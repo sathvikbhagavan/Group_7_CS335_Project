@@ -1,4 +1,6 @@
 # compiler_7
 ## Course Project for Group 7, Compiler Design (Spring 2022)
 
-Specification file can be found in `./docs/`. (Milestone 1)
+
+### Milestone 1
+Project specifications can be found in `./docs/specs.pdf`. 
