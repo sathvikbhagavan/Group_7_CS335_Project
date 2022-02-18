@@ -16,9 +16,9 @@ int main() {
             break;
         }
     }
-l:
-    output("Goto");
 
+    l: n=1;
+    
     return 0;
     
 }

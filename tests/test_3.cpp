@@ -1,6 +1,9 @@
 int main()
 {
 	int k=1;
+	int e = 1;
+	bool fg, xg;
+	
 	k++;
 	k+=1;
 	k<<=1;
@@ -21,9 +24,9 @@ int main()
     k|=2;
     k&=2;
 
-    int e= e+ (3*e) -4/4*2%67;
-    bool fg= (e>4) || (e<5) && (e&2) || (!e|1);
-    bool xg= e>=0 && e<=90;
+	k = (1|2);
+    fg= (e>4) || (e<5) && (e&2);
+    xg= e>=0 && e<=90;
     return 0;
 }
 
