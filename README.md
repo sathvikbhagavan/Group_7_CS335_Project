@@ -26,3 +26,15 @@ make parse_n
 The AST output (in string format) will be displayed on the terminal. The `~/parser.out` file contains all parser rules.
 
 The the DOT file for generating automaton is at `~/utils/graph.dot`, and the automaton graph is at `~/docs/automaton.pdf`.
+
+
+## Milestone 4 (semantics)
+
+There are 5 testcases in  `~/tests/semantic`. To run test `n`, run the following command in the main (`~/`) directory: 
+
+```console
+make semantic_n
+```
+(`n = 1,2,...,5`)
+
+symboltable.csv will get created and get saved in main (`~/`) directory.
