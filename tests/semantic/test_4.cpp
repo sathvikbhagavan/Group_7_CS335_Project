@@ -1,25 +1,16 @@
 int func(int a, int b, int c){
     
-    float l;
+    int l;
     return l;
 }
 
 int main() {
-    int cc = func(2,3,1);
-    int *t;
-    float *t1;
-    float t2;
-    {
-        int n;
-    }
-
-    {
-        int p,n;
-    }
+    int m;
+    m = 1;
     while(1){
-        m++;
+        m = m+1;
         if(m>2){
-            m++;
+            m = m-1;
         }
     }
 }

@@ -1,0 +1,3 @@
+entity_name,entity_type,scope_id,scope_name,parent_scope_id
+main,"('int', 0)",Function,0,Global,
+x,int,Variable,1,cmpd_1,0

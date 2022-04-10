@@ -1,12 +1,9 @@
-int func(int a, int b, int c){
-    
-    float l;
-    return l;
-}
-
 int main() {
-
-    int cc = func(2, 3);
-    int cc;
+    int sum=0, i, j;
+    for(i=0; i<10; i=i+1) {
+        for(j=i+1; j<10; j=j+1) {
+            sum = i+j;
+        } 
+    }
     return 0;
 }

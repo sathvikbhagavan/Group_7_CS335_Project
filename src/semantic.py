@@ -1,4 +1,6 @@
+from curses import initscr
 from typing import List, Union, TypeVar
+from numpy import isin
 import pydot
 import csv
 import pandas as pd
@@ -8,7 +10,13 @@ from ply.lex import lex
 from ply.yacc import yacc, NullLogger
 import argparse
 import string
+import os
 
+
+tmp_var_index = 0
+string_to_temp_var_map = {}
+
+var_index = 0
 
 precedence = (
     ("nonassoc", "IF"),
@@ -22,11 +30,39 @@ precedence = (
 # ------------------------ ------------------------
 
 
+dtype_size = {"int": 4, "float": 8, "char": 1}
+
+
+def get_stack_size(func_name):
+    global stack_space
+    total_size = 0
+    for var in stack_space[func_name]:
+        total_size += var["size"]
+
+    return total_size
+
+
 def p_start(p):
     """
     start : translation_unit
     """
-    p[0] = cppStart(p[1])
+    p[0] = {}
+    p[0]["code"] = []
+    p[0]["data"] = cppStart(p[1]["data"])
+    if "code" in p[1].keys():
+        p[0]["code"] = p[1]["code"]
+    print(p[0]["code"])
+
+    with open("3AC.code", "w") as f:
+        for i in p[0]["code"]:
+            # f.write(i)
+            if isinstance(i, list):
+                f.write(i[0])
+                f.write("\n")
+            else:
+                f.write(i)
+                f.write("\n")
+            # print(i[0])
 
 
 def p_error(p):
@@ -49,7 +85,7 @@ def p_predefined_functions(p):
                         | READ
                         | OPEN
     """
-
+    p[0] = {}
     if p[1] in [
         "INPUT",
         "OUTPUT",
@@ -62,16 +98,16 @@ def p_predefined_functions(p):
         "SQUARE_ROOT",
     ]:
         result = cppPredefFunc(p[1].lower())
-    elif p[1] == "STRING_COPY":
+    elif p[1] == "strcpy":
         result = cppPredefFunc("strcpy")
-    elif p[1] == "STRING_REVERSE":
+    elif p[1] == "strev":
         result = cppPredefFunc("strev")
-    elif p[1] == "STRING_LENGTH":
+    elif p[1] == "strlen":
         result = cppPredefFunc("strlen")
-    elif p[1] == "STRING_COMPARE":
+    elif p[1] == "strcmp":
         result = cppPredefFunc("strcmp")
 
-    p[0] = ("predefined_functions", result)
+    p[0]["data"] = ("predefined_functions", result)
 
 
 def p_primary_expression(p):
@@ -82,19 +118,45 @@ def p_primary_expression(p):
         | LEFT_PARENTHESIS expression RIGHT_PARENTHESIS
         | predefined_functions
     """
-    result = ""
-    if (
-        p[1][0] == "constant"
-        or p[1][0] == "string"
-        or p[1][0] == "predefined_functions"
-    ):
-        result = p[1][1]
-    elif p[1] == "(":
-        result = p[2][1]
-    else:
-        result = cppId(p[1])
 
-    p[0] = ("primary_expression", result)
+    p[0] = {}
+    result = ""
+
+    if not isinstance(p[1], (str, int, float)) and (
+        p[1]["data"][0] == "constant"
+        or p[1]["data"][0] == "string"
+        or p[1]["data"][0] == "predefined_functions"
+    ):
+        result = p[1]["data"][1]
+
+        p[0]["place"] = symboltab.add_temp_var(p[1]["data"][1]._type.typename)
+        p[0]["code"] = ["    " + p[0]["place"] + " = " + str(p[1]["data"][1].val)]
+    elif p[1] == "(":
+        result = p[2]["data"][1]
+
+        if "code" in p[2].keys():
+            p[0]["code"] = p[2]["code"]
+        if "place" in p[2].keys():
+            p[0]["place"] = p[2]["place"]
+
+    else:
+
+        if p[1] in symboltab.get_current_scope().var_to_string_map.keys():
+            p[0]["place"] = symboltab.get_current_scope().var_to_string_map[p[1]]
+        else:
+            p[0]["place"] = symboltab.add_temp_var("int")
+        p[0]["code"] = []
+
+        # curr_scope = symboltab.get_current_scope()
+        # print(curr_scope.string_to_var_map[curr_scope.var_to_string_map[p[1]]][0].name)
+        # if p[1] not in curr_scope.var_to_string_map:
+        #     print(f"Using undeclared variable at line number: {driver.lexer.lineno}")
+
+        # elif curr_scope.variables[p[1]] is not None:
+        # # print(curr_scope.string_to_var_map)
+        result = cppId(p[1])
+        # print(result=="")
+    p[0]["data"] = ("primary_expression", result)
 
 
 def p_constant(p):
@@ -106,27 +168,29 @@ def p_constant(p):
         | FALSE
         | NULL
     """
+    p[0] = {}
 
     if isinstance(p[1], int):
-        result = cppConst(p[1], TypeVar("int"))
+        result = cppConst(p[1], cppType("int"))
     elif p[1] in range(ord("a"), ord("z") + 1) or p[1] in range(ord("A"), ord("Z") + 1):
-        result = cppConst(p[1], TypeVar("char"))
+        result = cppConst(p[1], cppType("char"))
     elif p[1] == "true" or p[1] == "false":
-        result = cppConst(p[1], TypeVar("bool"))
+        result = cppConst(p[1], cppType("bool"))
     else:
-        result = cppConst(p[1], TypeVar("float"))
+        result = cppConst(p[1], cppType("float"))
 
-    p[0] = ("constant", result)
+    p[0]["data"] = ("constant", result)
 
 
 def p_string(p):
     """
     string : STRING_LITERAL
     """
+    p[0] = {}
 
-    result = cppConst(p[1], TypeVar("string"))
+    result = cppConst(p[1], cppType("string"))
 
-    p[0] = ("string", result)
+    p[0]["data"] = ("string", result)
 
 
 def p_postfix_expression(p):
@@ -140,38 +204,93 @@ def p_postfix_expression(p):
                        | postfix_expression PLUS_PLUS
                        | postfix_expression MINUS_MINUS
     """
+    p[0] = {}
+
     result = None
-    if p[1][0] == "primary_expression":
-        result = cppPostfixExpr(p[1][1], None)
+    if p[1]["data"][0] == "primary_expression":
+        # print(p[1]["data"][1]=="")
+        result = cppPostfixExpr(p[1]["data"][1], None)
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"].copy()
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+    elif p[1]["data"][0] == "postfix_expression":
 
-    elif p[1][0] == "postfix_expression":
+        if len(p) == 5 and p[3]["data"][0] == "expression":
+            result = cppPostfixExpr(
+                p[1]["data"][1],
+                cppOp("arr_index"),
+                p[3]["data"][1][0].pf_expr,
+                None,
+            )
 
-        if len(p) == 5 and p[3][0] == "expression":
-            result = cppPostfixExpr(p[1][1], cppOp("arr_index"), p[3][1])
-
-        elif len(p) == 5 and p[3][0] == "argument_expression_list":
-            if p[1][1].pf_expr.name in symboltab.functions.keys():
-                len_params = symboltab.functions[p[1][1].pf_expr.name][1]
-                len_args = len(p[3][1])
+        elif len(p) == 5 and p[3]["data"][0] == "argument_expression_list":
+            if p[1]["data"][1].pf_expr.name in symboltab.functions.keys():
+                len_params = symboltab.functions[p[1]["data"][1].pf_expr.name][1]
+                len_args = len(p[3]["data"][1])
                 if len_params == len_args:
-                    result = cppPostfixExpr(p[1][1], cppOp("func_call"), p[3][1])
+
+                    result = cppPostfixExpr(
+                        p[1]["data"][1], cppOp("func_call"), None, p[3]["data"][1]
+                    )
+                    p[0]["place"] = symboltab.add_temp_var("int")
+                    func_call = p[1]["data"][1].pf_expr.name + "|"
+
+                    stack = str(get_stack_size(p[1]["data"][1].pf_expr.name))
+                    push_param = []
+                    exp_sig = "FunCall " + func_call
+                    i = 0
+                    for var in p[3]["data"][1]:
+                        if isinstance(var, cppId):
+                            push_param.append(
+                                "    Push_param"
+                                + ":"
+                                + symboltab.get_current_scope().var_to_string_map[var]
+                            )
+                            exp_sig += var._type.typename
+                            exp_sig += ","
+                        elif isinstance(var, cppPostfixExpr):
+                            if i < len(p[3]["code"]):
+                                reg = p[3]["code"][i].split(" = ")[0]
+                                i = i + 1
+                                push_param.append("    Push_param" + ":" + reg)
+                                exp_sig += var.pf_expr._type.typename
+                                exp_sig += ","
+                    p[0]["code"] = (
+                        p[1]["code"]
+                        + p[3]["code"]
+                        + push_param
+                        + [
+                            "    "
+                            + p[0]["place"]
+                            + " = "
+                            + (
+                                exp_sig
+                                if exp_sig == "FunCall " + func_call
+                                else exp_sig[:-1]
+                            )
+                        ]
+                    )
+                    p[0]["code"] = p[0]["code"] + [
+                        "    " + "Remove_from_stack : " + stack + " space"
+                    ]
                 else:
                     print(
-                        f"Function {p[1][1].pf_expr.name} expects {len_params} args, but {len_args} were given at line {driver.lexer.lineno}.\n"
+                        f"Function {p[1]['data'][1].pf_expr.name} expects {len_params} args, but {len_args} were given at line {driver.lexer.lineno}.\n"
                     )
 
             else:
                 print(
-                    f"Function {p[1][1].pf_expr.name} called without declaration at line {driver.lexer.lineno}.\n"
+                    f"Function {p[1]['data'][1].pf_expr.name} called without declaration at line {driver.lexer.lineno}.\n"
                 )
         elif p[2] == "." or p[2] == "->":
 
-            result = cppPostfixExpr(p[1][1], cppOp(p[2]), cppId(p[3]))
+            result = cppPostfixExpr(p[1]["data"][1], cppOp(p[2]), None, cppId(p[3]))
         else:
 
-            result = cppPostfixExpr(p[1][1], cppOp(p[2]), None)
+            result = cppPostfixExpr(p[1]["data"][1], cppOp(p[2]), None, None)
 
-    p[0] = ("postfix_expression", result)
+    p[0]["data"] = ("postfix_expression", result)
 
 
 def p_argument_expression_list(p):
@@ -179,12 +298,22 @@ def p_argument_expression_list(p):
     argument_expression_list : assignment_expression
         | argument_expression_list COMMA assignment_expression
     """
-    if p[1][0] == "assignment_expression":
-        result = [p[1][1]]
-    else:
-        result = p[1][1] + [p[3][1]]
+    p[0] = {}
 
-    p[0] = ("argument_expression_list", result)
+    if p[1]["data"][0] == "assignment_expression":
+        result = [p[1]["data"][1]]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+    else:
+        result = p[1]["data"][1] + [p[3]["data"][1]]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"].copy() + p[3]["code"].copy()
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"] + p[3]["place"]
+
+    p[0]["data"] = ("argument_expression_list", result)
 
 
 # TODO: star for multiply vs pointer
@@ -194,23 +323,47 @@ def p_unary_expression(p):
         | PLUS_PLUS unary_expression
         | MINUS_MINUS unary_expression
         | unary_operator cast_expression
-        | SIZEOF unary_expression
         | SIZEOF LEFT_PARENTHESIS type_specifier RIGHT_PARENTHESIS
     """
+    # | SIZEOF unary_expression
+    p[0] = {}
 
-    if p[1][0] == "postfix_expression":
-        # result = cppUnExpr(p[1][1].pf_expr, p[1][1].pf_op)
-        result = p[1][1]
-    elif p[2][0] == "unary_expression":
-        result = cppUnExpr(p[2][1], cppOp(p[1]))
-    elif p[2][0] == "cast_expression":
-        result = cppUnExpr(p[2][1], p[1][1])
+    if p[1]["data"][0] == "postfix_expression":
+
+        result = p[1]["data"][1]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+    elif p[2]["data"][0] == "unary_expression":
+        result = cppUnExpr(p[2]["data"][1], cppOp(p[1]))
+        if "code" in p[2].keys() and "place" in p[2].keys():
+            p[0]["code"] = p[2]["code"] + [p[2]["place"] + " " + p[1]]
+    elif p[2]["data"][0] == "cast_expression":
+        # print(p[2]["data"][1].expr_type)
+        if p[1]["data"][1].op == "-" or p[1]["data"][1].op == "+":
+            pre = -1 if p[1]["data"][1].op == "-" else 1
+            temp = symboltab.add_temp_var(p[2]["data"][1].expr_type)
+            if "place" not in p[0].keys():
+                p[0]["place"] = symboltab.add_temp_var("int")
+            p[0]["code"] = [
+                "    " + p[0]["place"] + " = " + str(pre * p[2]["data"][1].pf_expr.val)
+            ]
+            result = cppPostfixExpr(
+                cppConst(
+                    pre * p[2]["data"][1].pf_expr.val,
+                    cppType(p[2]["data"][1].expr_type),
+                ),
+                None,
+            )
+        else:
+            result = cppUnExpr(p[2]["data"][1], p[1]["data"][1])
     # elif p[2][1] == "unary_expression":
     #     result = cppUnExpr(p[2][1], p[1])
     elif p[2] == "(":
-        result = cppUnExpr(p[3][1], cppOp(p[1]))
+        result = cppUnExpr(p[3]["data"][1], cppOp(p[1]))
 
-    p[0] = ("unary_expression", result)
+    p[0]["data"] = ("unary_expression", result)
 
 
 def p_unary_operator(p):
@@ -222,10 +375,11 @@ def p_unary_operator(p):
                    | NOT
                    | TILDE
     """
+    p[0] = {}
 
     result = cppOp(p[1])
 
-    p[0] = ("unary_operator", result)
+    p[0]["data"] = ("unary_operator", result)
 
 
 def p_cast_expression(p):
@@ -233,13 +387,22 @@ def p_cast_expression(p):
     cast_expression : unary_expression
         | LEFT_PARENTHESIS type_specifier RIGHT_PARENTHESIS cast_expression
     """
+    p[0] = {}
 
     if p[1] == "(":
-        result = cppCastExpr(p[4][1], None, p[2][1])
-    else:
-        result = p[1][1]
+        result = cppCastExpr(p[4]["data"][1], None, p[2]["data"][1])
+        # p[0]["place"] = symboltab.add_temp_var(p[2])
+        # if "place" in p[4].keys():
+        #     p[0]["code"] = p[4]["code"]+[p[0]["place"]+" = "+p[1]["place"]+" "+p[2]+" "+p[3]["place"]]
 
-    p[0] = ("cast_expression", result)
+    else:
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+
+    p[0]["data"] = ("cast_expression", result)
 
 
 def p_multiplicative_expression(p):
@@ -249,13 +412,34 @@ def p_multiplicative_expression(p):
         | multiplicative_expression DIVIDE cast_expression
         | multiplicative_expression MODULUS cast_expression
     """
+    p[0] = {}
 
-    if p[1][0] == "multiplicative_expression":
-        result = cppArithExpr(p[1][1], cppOp(p[2]), p[3][1])
+    if p[1]["data"][0] == "multiplicative_expression":
+        result = cppArithExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[0]["place"]
+                    + " = "
+                    + p[1]["place"]
+                    + " "
+                    + p[2]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
+
     else:
-        result = p[1][1]
-
-    p[0] = ("multiplicative_expression", result)
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+    p[0]["data"] = ("multiplicative_expression", result)
 
 
 def p_additive_expression(p):
@@ -264,13 +448,34 @@ def p_additive_expression(p):
         | additive_expression PLUS multiplicative_expression
         | additive_expression MINUS multiplicative_expression
     """
+    p[0] = {}
 
-    if p[1][0] == "multiplicative_expression":
-        result = p[1][1]
+    if p[1]["data"][0] == "multiplicative_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
     else:
-        result = cppArithExpr(p[1][1], cppOp(p[2]), p[3][1])
+        result = cppArithExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[0]["place"]
+                    + " = "
+                    + p[1]["place"]
+                    + " "
+                    + p[2]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
 
-    p[0] = ("additive_expression", result)
+    p[0]["data"] = ("additive_expression", result)
 
 
 def p_shift_expression(p):
@@ -279,13 +484,33 @@ def p_shift_expression(p):
         | shift_expression LEFT_SHIFT additive_expression
         | shift_expression RIGHT_SHIFT additive_expression
     """
+    p[0] = {}
 
-    if p[1][0] == "additive_expression":
-        result = p[1][1]
+    if p[1]["data"][0] == "additive_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
     else:
-        result = cppShiftExpr(p[1][1], cppOp(p[2]), p[3][1])
+        result = cppShiftExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    p[0]["place"]
+                    + " = "
+                    + p[1]["place"]
+                    + " "
+                    + p[2]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
 
-    p[0] = ("shift_expression", result)
+    p[0]["data"] = ("shift_expression", result)
 
 
 def p_relational_expression(p):
@@ -296,12 +521,34 @@ def p_relational_expression(p):
         | relational_expression LESS_THAN_EQUALS shift_expression
         | relational_expression GREATER_THAN_EQUALS shift_expression
     """
-    if p[1][0] == "shift_expression":
-        result = p[1][1]
-    else:
-        result = cppRelationExpr(p[1][1], cppOp(p[2]), p[3][1])
+    p[0] = {}
 
-    p[0] = ("relational_expression", result)
+    if p[1]["data"][0] == "shift_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+    else:
+        result = cppRelationExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[2]
+                    + " "
+                    + p[0]["place"]
+                    + " "
+                    + p[1]["place"]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
+
+    p[0]["data"] = ("relational_expression", result)
 
 
 def p_equality_expression(p):
@@ -310,13 +557,34 @@ def p_equality_expression(p):
         |  equality_expression EQUALS_EQUALS relational_expression
         |  equality_expression NOT_EQUALS relational_expression
     """
+    p[0] = {}
 
-    if p[1][0] == "relational_expression":
-        result = p[1][1]
+    if p[1]["data"][0] == "relational_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
     else:
-        result = cppRelationExpr(p[1][1], cppOp(p[2]), p[3][1])
+        result = cppRelationExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[2]
+                    + " "
+                    + p[0]["place"]
+                    + " "
+                    + p[1]["place"]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
 
-    p[0] = ("equality_expression", result)
+    p[0]["data"] = ("equality_expression", result)
 
 
 def p_and_expression(p):
@@ -324,13 +592,34 @@ def p_and_expression(p):
     and_expression : equality_expression
         | and_expression AND equality_expression
     """
+    p[0] = {}
 
-    if p[1][0] == "equality_expression":
-        result = p[1][1]
+    if p[1]["data"][0] == "equality_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
     else:
-        result = cppLogicExpr(p[1][1], cppOp(p[2]), p[3][1])
+        result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[2]
+                    + " "
+                    + p[0]["place"]
+                    + " "
+                    + p[1]["place"]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
 
-    p[0] = ("and_expression", result)
+    p[0]["data"] = ("and_expression", result)
 
 
 def p_xor_expression(p):
@@ -338,12 +627,34 @@ def p_xor_expression(p):
     xor_expression : and_expression
         | xor_expression XOR and_expression
     """
-    if p[1][0] == "and_expression":
-        result = p[1][1]
-    else:
-        result = cppLogicExpr(p[1][1], cppOp(p[2]), p[3][1])
+    p[0] = {}
 
-    p[0] = ("xor_expression", result)
+    if p[1]["data"][0] == "and_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+    else:
+        result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[2]
+                    + " "
+                    + p[0]["place"]
+                    + " "
+                    + p[1]["place"]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
+
+    p[0]["data"] = ("xor_expression", result)
 
 
 def p_or_expression(p):
@@ -351,13 +662,34 @@ def p_or_expression(p):
     or_expression : xor_expression
         | or_expression OR xor_expression
     """
+    p[0] = {}
 
-    if p[1][0] == "xor_expression":
-        result = p[1][1]
+    if p[1]["data"][0] == "xor_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
     else:
-        result = cppLogicExpr(p[1][1], cppOp(p[2]), p[3][1])
+        result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[2]
+                    + " "
+                    + p[0]["place"]
+                    + " "
+                    + p[1]["place"]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
 
-    p[0] = ("or_expression", result)
+    p[0]["data"] = ("or_expression", result)
 
 
 def p_logical_and_expression(p):
@@ -365,12 +697,34 @@ def p_logical_and_expression(p):
     logical_and_expression : or_expression
         | logical_and_expression AND_AND or_expression
     """
-    if p[1][0] == "or_expression":
-        result = p[1][1]
-    else:
-        result = cppLogicExpr(p[1][1], cppOp(p[2]), p[3][1])
+    p[0] = {}
 
-    p[0] = ("logical_and_expression", result)
+    if p[1]["data"][0] == "or_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+    else:
+        result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[2]
+                    + " "
+                    + p[0]["place"]
+                    + " "
+                    + p[1]["place"]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
+
+    p[0]["data"] = ("logical_and_expression", result)
 
 
 def p_logical_or_expression(p):
@@ -378,12 +732,33 @@ def p_logical_or_expression(p):
     logical_or_expression : logical_and_expression
         | logical_or_expression OR_OR logical_and_expression
     """
-    if p[1][0] == "logical_and_expression":
-        result = p[1][1]
-    else:
-        result = cppLogicExpr(p[1][1], cppOp(p[2]), p[3][1])
+    p[0] = {}
 
-    p[0] = ("logical_or_expression", result)
+    if p[1]["data"][0] == "logical_and_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+    else:
+        result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+        p[0]["place"] = symboltab.add_temp_var("int")
+        if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["code"] = (
+                p[1]["code"]
+                + p[3]["code"]
+                + [
+                    "    "
+                    + p[2]
+                    + " "
+                    + p[0]["place"]
+                    + " "
+                    + p[1]["place"]
+                    + " "
+                    + p[3]["place"]
+                ]
+            )
+    p[0]["data"] = ("logical_or_expression", result)
 
 
 def p_conditional_expression(p):
@@ -391,12 +766,18 @@ def p_conditional_expression(p):
     conditional_expression : logical_or_expression
         |  logical_or_expression QUESTION_MARK expression COLON conditional_expression
     """
-    if p[1][0] == "logical_or_expression":
-        result = p[1][1]
-    else:
-        result = cppCondExpr(p[1][1], p[3][1], p[5][1])
+    p[0] = {}
 
-    p[0] = ("conditional_expression", result)
+    if p[1]["data"][0] == "logical_or_expression":
+        result = p[1]["data"][1]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+    else:
+        result = cppCondExpr(p[1]["data"][1], p[3]["data"][1], p[5]["data"][1])
+
+    p[0]["data"] = ("conditional_expression", result)
 
 
 def p_assignment_expression(p):
@@ -406,12 +787,52 @@ def p_assignment_expression(p):
 
     """
 
-    if p[1][0] == "conditional_expression":
-        result = p[1][1]
-    else:
-        result = cppAssignExpr(cppUnExpr(p[1][1], None), p[2][1], p[3][1])
+    p[0] = {}
+    curr_scope = symboltab.get_current_scope()
+    if "place" in p[1].keys():
+        p[0]["place"] = p[1]["place"]
+    if p[1]["data"][0] == "conditional_expression":
+        result = p[1]["data"][1]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"].copy()
 
-    p[0] = ("assignment_expression", result)
+    else:
+        result = cppAssignExpr(
+            cppUnExpr(p[1]["data"][1], None), p[2]["data"][1], p[3]["data"][1]
+        )
+        code = []
+        rhs = p[3]["place"]
+
+        # print(p[1]["data"][1].pf_expr.name==None)
+        if p[2]["data"][1].op == "=":
+            code = [
+                "    "
+                + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
+                + " = "
+                + str(rhs)
+            ]
+        else:
+            assigner = symboltab.add_temp_var("int")
+            code = [
+                "    "
+                + assigner
+                + " = "
+                + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
+                + " "
+                + p[2]["data"][1].op[0]
+                + " "
+                + +rhs
+            ]
+            code = code + [
+                "    "
+                + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
+                + " = "
+                + assigner
+            ]
+
+        if "code" in p[3].keys() and "code" in p[1].keys():
+            p[0]["code"] = p[3]["code"].copy() + p[1]["code"].copy() + code
+    p[0]["data"] = ("assignment_expression", result)
 
 
 def p_assignment_operator(p):
@@ -428,9 +849,10 @@ def p_assignment_operator(p):
         |  OR_EQUALS
         |  XOR_EQUALS
     """
+    p[0] = {}
 
     result = cppOp(p[1])
-    p[0] = ("assignment_operator", result)
+    p[0]["data"] = ("assignment_operator", result)
 
 
 def p_expression(p):
@@ -438,13 +860,19 @@ def p_expression(p):
     expression : assignment_expression
         | expression COMMA assignment_expression
     """
-
-    if p[1][0] == "assignment_expression":
-        result = [p[1][1]]
+    p[0] = {}
+    if "place" in p[1].keys():
+        p[0]["place"] = p[1]["place"]
+    if p[1]["data"][0] == "assignment_expression":
+        result = [p[1]["data"][1]]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
     else:
-        result = p[1][1] + [p[3][1]]
+        result = p[1]["data"][1] + [p[3]["data"][1]]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"] + p[2]["code"]
 
-    p[0] = ("expression", result)
+    p[0]["data"] = ("expression", result)
 
 
 def p_declaration(p):
@@ -453,15 +881,19 @@ def p_declaration(p):
                 | type_specifier init_declarators_list SEMICOLON
                 | class_specifier
     """
+    p[0] = {}
 
-    if len(p) == 1:
-        result = cppDeclaration(cppType(p[1][1].c_name), None)
-    elif len(p) == 2:
-        result = cppDeclaration(p[1][1], None)
+    if len(p) == 2:
+        result = cppDeclaration(cppType(p[1]["data"][1].c_name.name), None)
+    elif len(p) == 3:
+        result = cppDeclaration(p[1]["data"][1], None)
     else:
-        result = cppDeclaration(p[1][1], p[2][1])
+        # print(p[2]["data"][1][0].declarator.ddecl.name.name)
+        # if p[2]["data"][1][0].initializer is not None:
+        #     print(p[2]["data"][1][0].initializer.init_expr.pf_expr.val)
 
-    p[0] = ("declaration", result)
+        result = cppDeclaration(p[1]["data"][1], p[2]["data"][1])
+    p[0]["data"] = ("declaration", result)
 
 
 def p_init_declarators_list(p):
@@ -469,13 +901,14 @@ def p_init_declarators_list(p):
     init_declarators_list : init_declarator
         | init_declarators_list COMMA init_declarator
     """
+    p[0] = {}
 
-    if p[1][0] == "init_declarator":
-        result = [p[1][1]]
+    if p[1]["data"][0] == "init_declarator":
+        result = [p[1]["data"][1]]
     else:
-        result = p[1][1] + [p[3][1]]
+        result = p[1]["data"][1] + [p[3]["data"][1]]
 
-    p[0] = ("init_declarators_list", result)
+    p[0]["data"] = ("init_declarators_list", result)
 
 
 def p_init_declarator(p):
@@ -484,13 +917,14 @@ def p_init_declarator(p):
                     | declarator
 
     """
+    p[0] = {}
 
     if len(p) == 2:
-        result = cppInitDeclarator(p[1][1], None)
+        result = cppInitDeclarator(p[1]["data"][1], None)
     else:
-        result = cppInitDeclarator(p[1][1], p[3][1])
+        result = cppInitDeclarator(p[1]["data"][1], p[3]["data"][1])
 
-    p[0] = ("init_declarator", result)
+    p[0]["data"] = ("init_declarator", result)
 
 
 def p_type_specifier(p):
@@ -507,15 +941,16 @@ def p_type_specifier(p):
         | struct_specifier
         | CLASS IDENTIFIER
     """
+    p[0] = {}
 
-    if p[1] == "CLASS":
-        result = cppType(TypeVar(f"class_{p[1]}"))
-    elif p[1][0] == "struct_specifier":
-        result = cppType(TypeVar(f"struct_{p[1][1].s_tag}"))
+    if p[1] == "class":
+        result = cppType(f"class_{p[1]}")
+    elif isinstance(p[1], dict) and p[1]["data"][0] == "struct_specifier":
+        result = cppType(f"struct_{p[1]['data'][1].s_tag.name}")
     else:
         result = cppType(p[1])
 
-    p[0] = ("type_specifier", result)
+    p[0]["data"] = ("type_specifier", result)
 
 
 def p_pointer(p):
@@ -523,8 +958,8 @@ def p_pointer(p):
     pointer : STAR
             | STAR pointer
     """
-
-    p[0] = ("pointer", None)
+    p[0] = {}
+    p[0]["data"] = ("pointer", None)
 
 
 def p_identifier_list(p):
@@ -532,13 +967,14 @@ def p_identifier_list(p):
     identifier_list : IDENTIFIER
                     | identifier_list COMMA IDENTIFIER
     """
+    p[0] = {}
 
     if len(p) == 2:
         result = [cppId(p[1])]
     else:
-        result = p[1][1] + [cppId(p[3])]
+        result = p[1]["data"][1] + [cppId(p[3])]
 
-    p[0] = ("identifier_list", result)
+    p[0]["data"] = ("identifier_list", result)
 
 
 def p_specifier_list(p):
@@ -546,12 +982,14 @@ def p_specifier_list(p):
     specifier_list : type_specifier specifier_list
                    | type_specifier
     """
-    if len(p) == 2:
-        result = [p[1][1]]
-    else:
-        result = [p[1][1]] + p[2][1]
+    p[0] = {}
 
-    p[0] = ("specifier_list", result)
+    if len(p) == 2:
+        result = [p[1]["data"][1]]
+    else:
+        result = [p[1]["data"][1]] + p[2]["data"][1]
+
+    p[0]["data"] = ("specifier_list", result)
 
 
 # Parameters and declarations
@@ -567,29 +1005,37 @@ def p_direct_declarator(p):
                       | direct_declarator LEFT_PARENTHESIS RIGHT_PARENTHESIS
     """
 
-    # result = None
-    # print(len(p))
+    p[0] = {}
+
     result = cppDirectDeclarator(None, None, None, None, None, -1)
     if len(p) == 2:
-        result = cppDirectDeclarator(cppId(p[1]), None, None, None, None, 1)
+        result = cppDirectDeclarator(cppId(p[1], None), None, None, None, None, 1)
     elif len(p) == 4:
         if p[1] == "(":
-            result = cppDirectDeclarator(p[2][1].name, None, p[2][1], None, None, 2)
+            result = cppDirectDeclarator(
+                p[2]["data"][1].name, None, p[2]["data"][1], None, None, 2
+            )
         elif p[2] == "[":
-            result = cppDirectDeclarator(None, p[1][1], None, None, None, 4)
+            result = cppDirectDeclarator(None, p[1]["data"][1], None, None, None, 4)
         elif p[2] == "(":
-            result = cppDirectDeclarator(None, p[1][1], None, None, None, 7)
+            result = cppDirectDeclarator(None, p[1]["data"][1], None, None, None, 7)
 
     elif len(p) == 5:
-        if p[3][0] == "conditional_expression":
-            result = cppDirectDeclarator(None, p[1][1], None, None, p[3][1], 3)
-        if p[3][0] == "parameter_list":
-            result = cppDirectDeclarator(None, p[1][1], None, p[3][1], None, 7)
-        if p[3][0] == "identifier_list":
-            result = cppDirectDeclarator(None, p[1][1], None, p[3][1], None, 6)
+        if p[3]["data"][0] == "conditional_expression":
 
-    # print(result)
-    p[0] = ("direct_declarator", result)
+            result = cppDirectDeclarator(
+                None, p[1]["data"][1], None, None, p[3]["data"][1], 3
+            )
+        if p[3]["data"][0] == "parameter_list":
+            result = cppDirectDeclarator(
+                None, p[1]["data"][1], None, p[3]["data"][1], None, 7
+            )
+        if p[3]["data"][0] == "identifier_list":
+            result = cppDirectDeclarator(
+                None, p[1]["data"][1], None, p[3]["data"][1], None, 6
+            )
+
+    p[0]["data"] = ("direct_declarator", result)
 
 
 def p_declarator(p):
@@ -597,14 +1043,16 @@ def p_declarator(p):
     declarator : pointer direct_declarator
                | direct_declarator
     """
+    p[0] = {}
 
-    if p[1][0] == "pointer":
-        result = cppDeclarator(p[2][1].name, None, None, True)
+    if p[1]["data"][0] == "pointer":
+        print(p[2]["data"][1].name.name)
+        result = cppDeclarator(p[2]["data"][1].name, None, None, True)
     else:
         # result = cppDeclarator(p[1][1].name, None)
-        result = cppDeclarator(p[1][1].name, p[1][1], None)
+        result = cppDeclarator(p[1]["data"][1].name, p[1]["data"][1], None)
 
-    p[0] = ("declarator", result)
+    p[0]["data"] = ("declarator", result)
 
 
 def p_parameter_list(p):
@@ -612,13 +1060,14 @@ def p_parameter_list(p):
     parameter_list : parameter_declaration
                    | parameter_list COMMA parameter_declaration
     """
+    p[0] = {}
 
-    if p[1][0] == "parameter_declaration":
-        result = [p[1][1]]
+    if p[1]["data"][0] == "parameter_declaration":
+        result = [p[1]["data"][1]]
     else:
-        result = p[1][1] + [p[3][1]]
+        result = p[1]["data"][1] + [p[3]["data"][1]]
 
-    p[0] = ("parameter_list", result)
+    p[0]["data"] = ("parameter_list", result)
 
 
 def p_parameter_declaration(p):
@@ -627,13 +1076,14 @@ def p_parameter_declaration(p):
                           | type_specifier abstract_declarator
                           | type_specifier
     """
+    p[0] = {}
 
-    if len(p) > 1:
-        result = cppParamDeclaration(p[1][1], p[2][1])
+    if len(p) > 2:
+        result = cppParamDeclaration(p[1]["data"][1], p[2]["data"][1])
     else:
-        result = cppParamDeclaration(p[1][1], None)
+        result = cppParamDeclaration(p[1]["data"][1], None)
 
-    p[0] = ("parameter_declaration", result)
+    p[0]["data"] = ("parameter_declaration", result)
 
 
 # Structs
@@ -645,17 +1095,20 @@ def p_struct_specifier(p):
                      | STRUCT LEFT_CURLY_BRACKET RIGHT_CURLY_BRACKET
                      | STRUCT IDENTIFIER
     """
+    p[0] = {}
 
     if len(p) == 6:
-        result = cppStruct(cppId(p[2]), cppId(p[2]), p[4][1])
+        result = cppStruct(cppId(p[2]), cppId(p[2]), p[4]["data"][1])
     elif len(p) == 5 and p[2] == "{":
-        result = cppStruct(None, None, p[3][1])
+        result = cppStruct(None, None, p[3]["data"][1])
     elif (len(p) == 5 and p[3] == "{") or len(p) == 3:
         result = cppStruct(cppId(p[2]), cppId(p[2]), None)
     elif len(p) == 4:
         result = cppStruct(None, None, None)
+    elif len(p) == 3:
+        result = cppStruct(None, None, None)
 
-    p[0] = ("struct_specifier", result)
+    p[0]["data"] = ("struct_specifier", result)
 
 
 def p_struct_declarator(p):
@@ -664,15 +1117,16 @@ def p_struct_declarator(p):
                       | COLON conditional_expression
                       | declarator COLON conditional_expression
     """
+    p[0] = {}
 
-    if p[1][0] == "declarator":
-        result = cppStructDeclarator(p[1][1], None)
+    if p[1]["data"][0] == "declarator":
+        result = cppStructDeclarator(p[1]["data"][1], None)
     elif p[1] == "COLON":
-        result = cppStructDeclarator(None, p[2][1])
+        result = cppStructDeclarator(None, p[2]["data"][1])
     else:
-        result = cppStructDeclarator(p[1][1], p[3][1])
+        result = cppStructDeclarator(p[1]["data"][1], p[3]["data"][1])
 
-    p[0] = ("struct_declarator", result)
+    p[0]["data"] = ("struct_declarator", result)
 
 
 def p_struct_declarator_list(p):
@@ -680,23 +1134,25 @@ def p_struct_declarator_list(p):
     struct_declarator_list : struct_declarator
                            | struct_declarator_list COMMA struct_declarator
     """
+    p[0] = {}
 
-    if p[1][0] == "struct_declarator":
-        result = [p[1][1]]
+    if p[1]["data"][0] == "struct_declarator":
+        result = [p[1]["data"][1]]
     else:
-        result = p[1][1] + [p[3][1]]
+        result = p[1]["data"][1] + [p[3]["data"][1]]
 
-    p[0] = ("struct_declarator_list", result)
+    p[0]["data"] = ("struct_declarator_list", result)
 
 
 def p_struct_declaration(p):
     """
     struct_declaration : specifier_list struct_declarator_list SEMICOLON
     """
+    p[0] = {}
 
-    result = cppStructDeclaration(p[1][1], p[2][1])
+    result = cppStructDeclaration(p[1]["data"][1], p[2]["data"][1])
 
-    p[0] = ("struct_declaration", result)
+    p[0]["data"] = ("struct_declaration", result)
 
 
 def p_struct_declaration_list(p):
@@ -704,13 +1160,14 @@ def p_struct_declaration_list(p):
     struct_declaration_list : struct_declaration
                             | struct_declaration_list struct_declaration
     """
+    p[0] = {}
 
-    if p[1][0] == "struct_declaration":
-        result = [p[1][1]]
+    if p[1]["data"][0] == "struct_declaration":
+        result = [p[1]["data"][1]]
     else:
-        result = p[1][1] + [p[2][1]]
+        result = p[1]["data"][1] + [p[2]["data"][1]]
 
-    p[0] = ("struct_declaration_list", result)
+    p[0]["data"] = ("struct_declaration_list", result)
 
 
 # TODO: what is base clause doing in the end
@@ -721,17 +1178,19 @@ def p_class_head(p):
                | CLASS IDENTIFIER base_clause
                | CLASS IDENTIFIER
     """
+    p[0] = {}
 
     result = {"c_name": None, "base_clause": None}
     if len(p) > 2:
-        if p[2][0] == "base_clause":
-            result["base_clause"] = p[2][1]
-        else:
-            result["c_name"] = p[2]
-            if len(p) > 3:
-                result["base_clause"] = p[3][1]
 
-    p[0] = ("class_head", result)
+        if isinstance(p[2], dict) and p[2]["data"][0] == "base_clause":
+            result["base_clause"] = p[2]["data"][1]
+        else:
+            result["c_name"] = f"class_{p[2]}"
+            if len(p) > 3:
+                result["base_clause"] = p[3]["data"][1]
+
+    p[0]["data"] = ("class_head", result)
 
 
 def p_class_specifier(p):
@@ -739,13 +1198,20 @@ def p_class_specifier(p):
     class_specifier : class_head LEFT_CURLY_BRACKET member_list RIGHT_CURLY_BRACKET SEMICOLON
                     | class_head LEFT_CURLY_BRACKET RIGHT_CURLY_BRACKET SEMICOLON
     """
+    p[0] = {}
 
     if p[3] == "}":
-        result = cppClass(cppId(p[1][1]["c_name"]), None, p[1][1]["base_clause"])
+        result = cppClass(
+            cppId(p[1]["data"][1]["c_name"]), None, p[1]["data"][1]["base_clause"]
+        )
     else:
-        result = cppClass(cppId(p[1][1]["c_name"]), p[3][1], p[1][1]["base_clause"])
+        result = cppClass(
+            cppId(p[1]["data"][1]["c_name"]),
+            p[3]["data"][1],
+            p[1]["data"][1]["base_clause"],
+        )
 
-    p[0] = ("class_specifier", result)
+    p[0]["data"] = ("class_specifier", result)
 
 
 def p_member_list(p):
@@ -754,23 +1220,25 @@ def p_member_list(p):
                 | access_list
                 | member_list access_list
     """
+    p[0] = {}
 
-    if p[1][0] in ["member_access_list", "access_list"]:
-        result = p[1][1]
+    if p[1]["data"][0] in ["member_access_list", "access_list"]:
+        result = p[1]["data"][1]
     else:
-        result = p[1][1] + p[2][1]
+        result = p[1]["data"][1] + p[2]["data"][1]
 
-    p[0] = ("member_list", result)
+    p[0]["data"] = ("member_list", result)
 
 
 def p_member_declarator(p):
     """
     member_declarator : init_declarator
     """
+    p[0] = {}
 
-    result = p[1][1]
+    result = p[1]["data"][1]
 
-    p[0] = ("member_declarator", result)
+    p[0]["data"] = ("member_declarator", result)
 
 
 def p_member_declarator_list(p):
@@ -778,13 +1246,14 @@ def p_member_declarator_list(p):
     member_declarator_list : member_declarator
                            | member_declarator_list COMMA member_declarator
     """
+    p[0] = {}
 
     if len(p) > 2:
-        result = [p[1][1]] + p[3][1]
+        result = [p[1]["data"][1]] + p[3]["data"][1]
     else:
-        result = [p[1][1]]
+        result = [p[1]["data"][1]]
 
-    p[0] = ("member_declarator_list", result)
+    p[0]["data"] = ("member_declarator_list", result)
 
 
 # TODO
@@ -797,27 +1266,30 @@ def p_member_declaration(p):
                        | function_definition
                        | class_specifier
     """
+    p[0] = {}
 
     if len(p) == 2:
-        if p[1] == "SEMICOLON":
+        if p[1] == ";":
             result = cppMemberDeclaration(None, None, None)
-        elif p[1][0] == "function_definition":
+        elif p[1]["data"][0] == "function_definition":
             result = cppMemberDeclaration(
-                p[1][1].func_type, p[1][1].func_param_list, "func"
+                p[1]["data"][1].func_type, p[1]["data"][1].func_param_list, "func"
             )
-        elif p[1][0] == "class_specifier":
+            if "code" in p[2].keys():
+                p[0]["code"] = [p[1]["code"].copy()]
+        elif p[1]["data"][0] == "class_specifier":
             result = cppMemberDeclaration(None, None, None)
 
     elif len(p) == 3:
-        if p[1][0] == "member_declarator_list":
-            result = cppMemberDeclaration(None, p[1][1], "var")
+        if p[1]["data"][0] == "member_declarator_list":
+            result = cppMemberDeclaration(None, p[1]["data"][1], "var")
         else:
-            result = cppMemberDeclaration(p[1][1], None, "var")
+            result = cppMemberDeclaration(p[1]["data"][1], None, "var")
 
     else:
-        result = cppMemberDeclaration(p[1][1], p[2][1], "var")
+        result = cppMemberDeclaration(p[1]["data"][1], p[2]["data"][1], "var")
 
-    p[0] = ("member_declaration", result)
+    p[0]["data"] = ("member_declaration", result)
 
 
 def p_access_list(p):
@@ -825,13 +1297,14 @@ def p_access_list(p):
     access_list : access_specifier COLON member_access_list
                 | access_specifier COLON
     """
+    p[0] = {}
 
     if len(p) > 2:
-        result = [p[1][1]] + p[3][1]
+        result = [p[1]["data"][1]] + p[3]["data"][1]
     else:
-        result = [p[1][1]]
+        result = [p[1]["data"][1]]
 
-    p[0] = ("access_list", result)
+    p[0]["data"] = ("access_list", result)
 
 
 def p_member_access_list(p):
@@ -839,23 +1312,29 @@ def p_member_access_list(p):
     member_access_list : member_declaration member_access_list
                        | member_declaration
     """
+    p[0] = {}
 
-    if len(p) > 1:
-        result = [p[1][1]] + p[2][1]
+    if len(p) == 3:
+        result = [p[1]["data"][1]] + p[2]["data"][1]
+        if "code" in p[1].keys():
+            p[0]["code"] = [p[1]["code"].copy()] + p[2]["code"]
     else:
-        result = [p[1][1]]
+        result = [p[1]["data"][1]]
+        if "code" in p[1].keys():
+            p[0]["code"] = [p[1]["code"].copy()]
 
-    p[0] = ("member_access_list", result)
+    p[0]["data"] = ("member_access_list", result)
 
 
 def p_base_clause(p):
     """
     base_clause : COLON base_specifier_list
     """
+    p[0] = {}
 
-    result = p[2][1]
+    result = p[2]["data"][1]
 
-    p[0] = ("base_clause", result)
+    p[0]["data"] = ("base_clause", result)
 
 
 def p_base_specifier_list(p):
@@ -863,13 +1342,14 @@ def p_base_specifier_list(p):
     base_specifier_list : base_specifier
               | base_specifier_list COMMA base_specifier
     """
+    p[0] = {}
 
-    if p[1][0] == "base_specifier":
-        result = [p[1][1]]
+    if p[1]["data"][0] == "base_specifier":
+        result = [p[1]["data"][1]]
     else:
-        result = p[1][1] + [p[3][1]]
+        result = p[1]["data"][1] + [p[3]["data"][1]]
 
-    p[0] = ("base_specifier_list", result)
+    p[0]["data"] = ("base_specifier_list", result)
 
 
 def p_base_specifier(p):
@@ -879,18 +1359,19 @@ def p_base_specifier(p):
                    | IDENTIFIER
                    | access_specifier IDENTIFIER
     """
+    p[0] = {}
 
     if p[1] == "class":
         result = cppBaseSpec(p[2].value, None)
     elif len(p) == 2:
         result = cppBaseSpec(p[1].value, None)
-    elif p[1][0] == "access_specifier":
+    elif p[1]["data"][0] == "access_specifier":
         if p[2] == "class":
-            result = cppBaseSpec(p[3].value, p[1][1])
+            result = cppBaseSpec(p[3].value, p[1]["data"][1])
         else:
-            result = cppBaseSpec(p[2].value, p[1][1])
+            result = cppBaseSpec(p[2].value, p[1]["data"][1])
 
-    p[0] = ("base_specifier", result)
+    p[0]["data"] = ("base_specifier", result)
 
 
 def p_access_specifier(p):
@@ -898,8 +1379,9 @@ def p_access_specifier(p):
     access_specifier : PRIVATE
                      | PUBLIC
     """
+    p[0] = {}
 
-    p[0] = ("access_specifier", p[1])
+    p[0]["data"] = ("access_specifier", p[1])
 
 
 def p_abstract_declarator(p):
@@ -907,15 +1389,18 @@ def p_abstract_declarator(p):
     | direct_abstract_declarator
     | pointer direct_abstract_declarator
     """
+    p[0] = {}
 
-    if len(p) == 2 and p[1][0] == "direct_abstract_declarator":
-        result = p[1][1]
+    if len(p) == 2 and p[1]["data"][0] == "direct_abstract_declarator":
+        result = p[1]["data"][1]
     elif len(p) == 3:
-        result = cppPointer(p[2][1].dadec_name, cppType("direct_abstract_declarator"))
+        result = cppPointer(
+            p[2]["data"][1].dadec_name, cppType("direct_abstract_declarator")
+        )
     else:
         result = cppPointer(None, None)
 
-    p[0] = ("abstract_declarator", result)
+    p[0]["data"] = ("abstract_declarator", result)
 
 
 def p_direct_abstract_declarator(p):
@@ -930,6 +1415,8 @@ def p_direct_abstract_declarator(p):
                                | direct_abstract_declarator LEFT_PARENTHESIS RIGHT_PARENTHESIS
                                | direct_abstract_declarator LEFT_PARENTHESIS parameter_list RIGHT_PARENTHESIS
     """
+    p[0] = {}
+
     if len(p) == 3:
         if p[1] == "[":
             result = cppDirectAbsDeclarator(None, None, None, None, None, 1)
@@ -937,25 +1424,33 @@ def p_direct_abstract_declarator(p):
             result = cppDirectAbsDeclarator(None, None, None, None, None, 5)
 
     elif len(p) == 4:
-        if p[2][0] == "abstract_declarator":
-            result = cppDirectAbsDeclarator(None, p[2][1], None, None, None, 0)
-        elif p[2][0] == "conditional_expression":
-            result = cppDirectAbsDeclarator(None, None, None, p[2][1], None, 2)
-        elif p[1][0] == "direct_abstract_declarator":
+        if p[2]["data"][0] == "abstract_declarator":
+            result = cppDirectAbsDeclarator(None, p[2]["data"][1], None, None, None, 0)
+        elif p[2]["data"][0] == "conditional_expression":
+            result = cppDirectAbsDeclarator(None, None, None, p[2]["data"][1], None, 2)
+        elif p[1]["data"][0] == "direct_abstract_declarator":
             if p[2] == "[":
-                result = cppDirectAbsDeclarator(p[1][1], None, None, None, None, 3)
+                result = cppDirectAbsDeclarator(
+                    p[1]["data"][1], None, None, None, None, 3
+                )
             else:
-                result = cppDirectAbsDeclarator(p[1][1], None, None, None, None, 7)
-        elif p[2][0] == "parameter_list":
-            result = cppDirectAbsDeclarator(None, None, None, None, p[2][1], 6)
+                result = cppDirectAbsDeclarator(
+                    p[1]["data"][1], None, None, None, None, 7
+                )
+        elif p[2]["data"][0] == "parameter_list":
+            result = cppDirectAbsDeclarator(None, None, None, None, p[2]["data"][1], 6)
 
     elif len(p) == 5:
-        if p[3][0] == "parameter_list":
-            result = cppDirectAbsDeclarator(p[1][1], None, None, None, p[2][1], 8)
-        elif p[3][0] == "conditional_expression":
-            result = cppDirectAbsDeclarator(p[1][1], None, None, p[2][1], None, 4)
+        if p[3]["data"][0] == "parameter_list":
+            result = cppDirectAbsDeclarator(
+                p[1]["data"][1], None, None, None, p[2]["data"][1], 8
+            )
+        elif p[3]["data"][0] == "conditional_expression":
+            result = cppDirectAbsDeclarator(
+                p[1]["data"][1], None, None, p[2]["data"][1], None, 4
+            )
 
-    p[0] = ("direct_abstract_declarator", result)
+    p[0]["data"] = ("direct_abstract_declarator", result)
 
 
 def p_initializer(p):
@@ -963,13 +1458,14 @@ def p_initializer(p):
     initializer : LEFT_CURLY_BRACKET initializer_list RIGHT_CURLY_BRACKET
                 | assignment_expression
     """
+    p[0] = {}
 
-    if p[1][0] == "assignment_expression":
-        result = cppInitializer(p[1][1])
+    if p[1]["data"][0] == "assignment_expression":
+        result = cppInitializer(p[1]["data"][1])
     else:
-        result = cppInitializer(p[2][1])
+        result = cppInitializer(p[2]["data"][1])
 
-    p[0] = ("initializer", result)
+    p[0]["data"] = ("initializer", result)
 
 
 def p_initializer_list(p):
@@ -977,13 +1473,14 @@ def p_initializer_list(p):
     initializer_list : initializer_list COMMA initializer
                      | initializer
     """
+    p[0] = {}
 
-    if p[1][0] == "initializer":
-        result = [p[1][1]]
+    if p[1]["data"][0] == "initializer":
+        result = [p[1]["data"][1]]
     else:
-        result = p[1][1] + [p[3][1]]
+        result = p[1]["data"][1] + [p[3]["data"][1]]
 
-    p[0] = ("initializer_list", result)
+    p[0]["data"] = ("initializer_list", result)
 
 
 def p_statement(p):
@@ -995,31 +1492,35 @@ def p_statement(p):
               | jump_statement
               | labeled_statement
     """
+    p[0] = {}
 
-    if p[1][0] == "compound_statement":
-        result = cppStmt("compound")
-    elif p[1][0] == "expression_statement":
-        result = cppStmt("expr")
-    elif p[1][0] == "selection_statement":
-        result = cppStmt("select")
-    elif p[1][0] == "iteration_statement":
-        result = cppStmt("iterate")
-    elif p[1][0] == "jump_statement":
-        result = cppStmt("jump")
-    elif p[1][0] == "labeled_statement":
-        result = cppStmt("label")
-
-    p[0] = ("statement", result)
+    # if p[1]["data"][0] == "compound_statement":
+    #     result = cppStmt("compound")
+    # elif p[1]["data"][0] == "expression_statement":
+    #     result = cppStmt("expr")
+    # elif p[1]["data"][0] == "selection_statement":
+    #     result = cppStmt("select")
+    # elif p[1]["data"][0] == "iteration_statement":
+    #     result = cppStmt("iterate")
+    # elif p[1]["data"][0] == "jump_statement":
+    #     result = cppStmt("jump")
+    # elif p[1]["data"][0] == "labeled_statement":
+    #     result = cppStmt("label")
+    p[0]["data"] = ("statement", p[1]["data"][1])
+    if "code" in p[1].keys():
+        p[0]["code"] = p[1]["code"]
+        # p[0]["place"] = p[1]["place"]
 
 
 def p_labeled_statement(p):
     """
     labeled_statement : IDENTIFIER COLON statement
     """
+    p[0] = {}
 
-    result = cppLabelStmt(cppId(p[1].value), p[3][1])
+    result = cppLabelStmt(cppId(p[1].value), p[3]["data"][1])
 
-    p[0] = ("labeled_statement", result)
+    p[0]["data"] = ("labeled_statement", result)
 
 
 def p_compound_statement(p):
@@ -1029,18 +1530,48 @@ def p_compound_statement(p):
                        | LEFT_CURLY_BRACKET statement_list RIGHT_CURLY_BRACKET
                        | LEFT_CURLY_BRACKET RIGHT_CURLY_BRACKET
     """
+    p[0] = {}
 
-    if p[2][0] == "declaration_list":
-        if p[3][0] == "statement_list":
-            result = cppCompoundStmt(p[2][1], p[3][1])
-        else:
-            result = cppCompoundStmt(p[2][1], None)
-    elif p[2][0] == "statement_list":
-        result = cppCompoundStmt(None, p[2][1])
-    else:
+    symboltab.cmpd_ctr += 1
+    if p[1] == "{" and p[2] == "}":
         result = cppCompoundStmt(None, None)
+    elif p[2]["data"][0] == "declaration_list":
+        # print(p[2]["data"][1][0].initdecl_list[0].declarator.name.name)
+        # print(p[2]["data"][1][0].initdecl_list[0].initializer.init_expr.pf_expr.val)
+        if p[3] == "}":
+            result = cppCompoundStmt(p[2]["data"][1], None)
 
-    p[0] = ("compound_statement", result)
+        elif p[3]["data"][0] == "statement_list":
+            result = cppCompoundStmt(p[2]["data"][1], p[3]["data"][1])
+        curr_scope = symboltab.get_current_scope()
+        lis_decl = []
+        for i in range(len(p[2]["data"][1])):
+            if p[2]["data"][1][i] is not None:
+                for j in range(len(p[2]["data"][1][i].initdecl_list)):
+                    lis_decl.append(
+                        "    "
+                        + curr_scope.var_to_string_map[
+                            p[2]["data"][1][i].initdecl_list[j].declarator.name.name
+                        ]
+                        + " = "
+                        + str(
+                            p[2]["data"][1][i]
+                            .initdecl_list[j]
+                            .initializer.init_expr.pf_expr.val
+                            if p[2]["data"][1][i].initdecl_list[j].initializer
+                            else "0"
+                        )
+                    )
+        p[0]["code"] = lis_decl
+        if p[3] != "}" and "code" in p[3].keys():
+            p[0]["code"] = p[0]["code"] + p[3]["code"]
+    elif p[2]["data"][0] == "statement_list":
+        if "code" in p[2].keys():
+            p[0]["code"] = p[2]["code"]
+        result = cppCompoundStmt(None, p[2]["data"][1])
+
+    # symboltab.remove_scope_from_stack()
+    p[0]["data"] = ("compound_statement", result)
 
 
 def p_declaration_list(p):
@@ -1048,13 +1579,20 @@ def p_declaration_list(p):
     declaration_list : declaration_list declaration
                      | declaration
     """
+    p[0] = {}
 
-    if p[1][0] == "declaration_list":
-        result = p[1][1] + [p[2][1]]
+    if p[1]["data"][0] == "declaration_list":
+        result = p[1]["data"][1] + [p[2]["data"][1]]
+        if "code" in p[1].keys() and "code" in p[2].keys():
+            p[0]["code"] = p[1]["code"] + p[2]["code"]
+
     else:
-        result = [p[1][1]]
 
-    p[0] = ("declaration_list", result)
+        result = [p[1]["data"][1]]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+
+    p[0]["data"] = ("declaration_list", result)
 
 
 def p_statement_list(p):
@@ -1062,13 +1600,22 @@ def p_statement_list(p):
     statement_list : statement
                    | statement_list statement
     """
+    p[0] = {}
 
-    if p[1][0] == "statement_list":
-        result = p[1][1] + [p[2][1]]
+    if p[1]["data"][0] == "statement_list":
+        result = p[1]["data"][1] + [p[2]["data"][1]]
+        if "code" in p[1].keys() and "code" in p[2].keys():
+            p[0]["code"] = p[1]["code"] + p[2]["code"]
+        if "place" in p[2].keys():
+            p[0]["place"] = p[2]["place"]
     else:
-        result = [p[1][1]]
+        result = [p[1]["data"][1]]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
 
-    p[0] = ("statement_list", result)
+    p[0]["data"] = ("statement_list", result)
 
 
 def p_expression_statement(p):
@@ -1076,11 +1623,14 @@ def p_expression_statement(p):
     expression_statement : expression SEMICOLON
                          | SEMICOLON
     """
-
-    if p[1] != "SEMICOLON":
-        p[0] = ("expression_statement", p[1][1])
+    p[0] = {}
+    if "place" in p[1].keys():
+        p[0]["place"] = p[1]["place"]
+        p[0]["code"] = p[1]["code"].copy()
+    if p[1] != ";":
+        p[0]["data"] = ("expression_statement", p[1]["data"][1])
     else:
-        p[0] = ("expression_statement", None)
+        p[0]["data"] = ("expression_statement", None)
 
 
 def p_selection_statement(p):
@@ -1088,14 +1638,36 @@ def p_selection_statement(p):
     selection_statement : IF LEFT_PARENTHESIS expression RIGHT_PARENTHESIS statement %prec IF
                         | IF LEFT_PARENTHESIS expression RIGHT_PARENTHESIS statement ELSE statement
     """
+    p[0] = {}
 
-    # print(len(p))
     if len(p) == 6:
-        result = cppSelectStmt(p[3][1], p[5][1], None)
+        result = cppSelectStmt(p[3]["data"][1], p[5]["data"][1], None)
+        p[0]["after"] = symboltab.add_temp_var()
+        p[0]["code"] = (
+            p[3]["code"]
+            + ["    ifz " + p[3]["place"] + " goto->" + p[0]["after"]]
+            + p[5]["code"]
+            + [p[0]["after"] + " : "]
+        )
     else:
-        result = cppSelectStmt(p[3][1], p[5][1], p[7][1])
-
-    p[0] = ("selection_statement", result)
+        result = cppSelectStmt(p[3]["data"][1], p[5]["data"][1], p[7]["data"][1])
+        p[0]["before"] = symboltab.add_temp_var()
+        p[0]["else"] = symboltab.add_temp_var()
+        p[0]["after"] = symboltab.add_temp_var()
+        string = (
+            ["    ifz " + p[3]["place"] + " goto->" + p[0]["else"]]
+            + p[5]["code"]
+            + ["goto->" + p[0]["after"]]
+        )
+        p[0]["code"] = (
+            p[3]["code"]
+            + [p[0]["before"] + " : "]
+            + string
+            + [p[0]["else"] + " : "]
+            + p[7]["code"]
+            + [p[0]["after"] + " : "]
+        )
+    p[0]["data"] = ("selection_statement", result)
 
 
 def p_iteration_statement(p):
@@ -1106,27 +1678,92 @@ def p_iteration_statement(p):
                         | FOR LEFT_PARENTHESIS expression_statement expression_statement RIGHT_PARENTHESIS compound_statement
                         | FOR LEFT_PARENTHESIS type_specifier expression_statement expression_statement RIGHT_PARENTHESIS compound_statement
     """
+    p[0] = {}
+
     result = None
 
     if p[1] == "while":
-        result = cppIterateStmt("while", None, p[3][1], None, p[5][1])
+        result = cppIterateStmt("while", None, p[3]["data"][1], None, p[5]["data"][1])
+        p[0]["begin"] = symboltab.add_temp_var("int")
+        p[0]["continue"] = symboltab.add_temp_var("int")
+        p[0]["after"] = symboltab.add_temp_var("int")
+        string = (
+            p[3]["code"]
+            + ["    " + "ifz " + p[3]["place"] + " goto->" + p[0]["after"]]
+            + p[5]["code"]
+            + ["goto->" + p[0]["begin"]]
+        )
+        string = [
+            "    goto->" + p[0]["after"] if i == "    break" else i for i in string
+        ]
+        p[0]["code"] = [
+            p[0]["begin"] + " : "
+        ] + string  # + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
+        # p[0]["code"] = p[0]["code"] + [p[0]["continue"] + " : "] + string + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
+        p[0]["code"] = p[0]["code"] + [p[0]["after"] + " : "]
     elif p[1] == "for":
-        if p[3][0] == "expression_statement":
+        if p[3]["data"][0] == "expression_statement":
             if p[5] == ")":
-                result = cppIterateStmt("for", p[3][1], p[4][1], None, p[6][1])
+
+                result = cppIterateStmt(
+                    "for", p[3]["data"][1], p[4]["data"][1], None, p[6]["data"][1]
+                )
             else:
-                result = cppIterateStmt("for", p[3][1], p[4][1], p[5][1], p[7][1])
+                p[0]["begin"] = symboltab.add_temp_var("int")
+                p[0]["after"] = symboltab.add_temp_var("int")
+                string = (
+                    p[4]["code"]
+                    + ["    " + "ifz " + p[4]["place"] + " goto->" + p[0]["after"]]
+                    + p[7]["code"]
+                    + p[5]["code"]
+                    + ["goto->" + p[0]["begin"]]
+                )
+                p[0]["code"] = (
+                    p[3]["code"] + [p[0]["begin"] + " : "] + string
+                )  # + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
+                # p[0]["code"] = p[0]["code"] + [p[0]["continue"] + " : "] + string + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
+                p[0]["code"] = p[0]["code"] + [p[0]["after"] + " : "]
+                result = cppIterateStmt(
+                    "for",
+                    p[3]["data"][1],
+                    p[4]["data"][1],
+                    p[5]["data"][1],
+                    p[7]["data"][1],
+                )
         else:
+
             if p[6] == ")":
                 result = cppIterateStmt(
-                    "for_init", (p[3][1], p[4][1]), p[5][1], None, p[7][1]
+                    "for_init",
+                    (p[3]["data"][1], p[4]["data"][1]),
+                    p[5]["data"][1],
+                    None,
+                    p[7]["data"][1],
                 )
             else:
+                p[0]["begin"] = symboltab.add_temp_var("int")
+                p[0]["after"] = symboltab.add_temp_var("int")
+                string = (
+                    p[5]["code"]
+                    + ["    " + "ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
+                    + p[8]["code"]
+                    + p[6]["code"]
+                    + ["goto->" + p[0]["begin"]]
+                )
+                p[0]["code"] = (
+                    p[4]["code"] + [p[0]["begin"] + " : "] + string
+                )  # + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
+                # p[0]["code"] = p[0]["code"] + [p[0]["continue"] + " : "] + string + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
+                p[0]["code"] = p[0]["code"] + [p[0]["after"] + " : "]
                 result = cppIterateStmt(
-                    "for_init", (p[3][1], p[4][1]), p[5][1], p[6][1], p[8][1]
+                    "for_init",
+                    (p[3]["data"][1], p[4]["data"][1]),
+                    p[5]["data"][1],
+                    p[6]["data"][1],
+                    p[8]["data"][1],
                 )
 
-    p[0] = ("iteration_statement", result)
+    p[0]["data"] = ("iteration_statement", result)
 
 
 def p_jump_statement(p):
@@ -1137,20 +1774,29 @@ def p_jump_statement(p):
                    | RETURN SEMICOLON
                    | RETURN expression SEMICOLON
     """
-    result = cppJumpStmt("return", None)
-    if p[1] == "GOTO":
-        result = cppJumpStmt("goto", cppId(p[2].value))
-    elif p[1] == "BREAK":
-        result = cppJumpStmt("break", None)
-    elif p[1] == "CONTINUE":
-        result = cppJumpStmt("continue", None)
-    elif p[1] == "RETURN":
-        if len(p) == 2:
-            result = cppJumpStmt("return", None)
-        else:
-            result = cppJumpStmt("return", p[2][1])
+    p[0] = {}
 
-    p[0] = ("jump_statement", result)
+    result = cppJumpStmt("return", None)
+    if p[1] == "goto":
+        result = cppJumpStmt("goto", cppId(p[2].value))
+        p[0]["code"] = ["goto->" + p[2]["place"]]
+    elif p[1] == "break":
+        result = cppJumpStmt("break", None)
+        p[0]["code"] = ["    break"]
+    elif p[1] == "continue":
+        result = cppJumpStmt("continue", None)
+        p[0]["code"] = ["    continue"]
+    elif p[1] == "return":
+        if len(p) == 3:
+            result = cppJumpStmt("return", None)
+            if "code" in p[2].keys():
+                p[0]["code"] = p[2]["code"] + ["    return"]
+        else:
+            result = cppJumpStmt("return", p[2]["data"][1][0])
+            if "code" in p[2].keys():
+                p[0]["code"] = p[2]["code"] + ["    return " + p[2]["place"]]
+
+    p[0]["data"] = ("jump_statement", result)
 
 
 def p_translation_unit(p):
@@ -1158,13 +1804,18 @@ def p_translation_unit(p):
     translation_unit : translation_unit external_declaration
                      | external_declaration
     """
+    p[0] = {}
 
     if len(p) == 2:
-        result = [p[1][1]]
+        result = [p[1]["data"][1]]
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"].copy()
     else:
-        result = p[1][1] + [p[2][1]]
+        result = p[1]["data"][1] + [p[2]["data"][1]]
+        if "code" in p[1].keys() and "code" in p[2].keys():
+            p[0]["code"] = p[1]["code"].copy() + p[2]["code"].copy()
 
-    p[0] = ("translation_unit", result)
+    p[0]["data"] = ("translation_unit", result)
 
 
 def p_external_declaration(p):
@@ -1172,13 +1823,17 @@ def p_external_declaration(p):
     external_declaration : function_definition
                          | declaration
     """
+    p[0] = {}
 
-    # if p[1][0] == "function_definition":
-    #     result = p[1]
-    # else:
-    #     result =
+    if p[1]["data"][0] == "function_definition":
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"].copy()
+    else:
+        if "code" in p[1].keys():
+            print("fgf")
+            p[0]["code"] = p[1]["code"].copy()
 
-    p[0] = ("external_declaration", p[1][1])
+    p[0]["data"] = ("external_declaration", p[1]["data"][1])
 
 
 def p_function_definition(p):
@@ -1188,22 +1843,36 @@ def p_function_definition(p):
                         | declarator declaration_list compound_statement
                         | declarator compound_statement
     """
-    # if p[2][1].name is not None:
-    # print(p[1][1].typename, p[2][1].name.name, p[3])
-    if p[1][0] == "type_specifier":
+    p[0] = {}
+    if p[1]["data"][0] == "type_specifier":
 
-        if p[3][0] == "declaration_list":
-            result = cppFuncDef(p[1][1], p[2][1].name, p[3][1], p[4][1])
-        elif p[3][0] == "compound_statement":
-            result = cppFuncDef(p[1][1], p[2][1], p[3][1])
-            # print(p[2][1].name)
-    elif p[1][0] == "declarator":
-        if p[2][0] == "declaration_list":
-            result = cppFuncDef(None, p[1][1].name, p[2][1], p[3][1])
-        elif p[2][0] == "compound_statement":
-            result = cppFuncDef(None, p[1][1].name, None, p[2][1])
+        if p[3]["data"][0] == "declaration_list":
+            result = cppFuncDef(
+                p[1]["data"][1], p[2]["data"][1].name, p[3]["data"][1], p[4]["data"][1]
+            )
+        elif p[3]["data"][0] == "compound_statement":
+            code = []
+            if p[2]["data"][1].ddecl.param_list is not None:
+                for i in p[2]["data"][1].ddecl.param_list:
+                    code.append(i.pdec_type.typename)
+            result = cppFuncDef(p[1]["data"][1], p[2]["data"][1], p[3]["data"][1])
+            if "code" in p[3].keys():
+                stack = str(get_stack_size(p[2]["data"][1].name.name))
+                p[0]["code"] = (
+                    [p[2]["data"][1].name.name + " | " + " , ".join(code)]
+                    + ["    Func_Start : Stack_space " + stack]
+                    + p[3]["code"]
+                    + ["    Func_End"]
+                )
+    elif p[1]["data"][0] == "declarator":
+        if p[2]["data"][0] == "declaration_list":
+            result = cppFuncDef(
+                None, p[1]["data"][1].name, p[2]["data"][1], p[3]["data"][1]
+            )
+        elif p[2]["data"][0] == "compound_statement":
+            result = cppFuncDef(None, p[1]["data"][1].name, None, p[2]["data"][1])
 
-    p[0] = ("function_definition", result)
+    p[0]["data"] = ("function_definition", result)
 
 
 class scopeInitialiser:
@@ -1211,17 +1880,20 @@ class scopeInitialiser:
         self,
         scope_id=0,
         scope_name="Global",
-        parent_scope_id=None,
+        parent_scope=None,
         current_scope_depth=0,
     ) -> None:
         self.scope_id = scope_id
-        self.parent_scope_id = parent_scope_id
+        self.parent = parent_scope
         self.scope_depth = current_scope_depth
         self.scope_name = scope_name
         self.variables = {}
         self.constants = {}
         self.structs = {}
         self.classes = {}
+        self.temp_variables = {}
+        self.var_to_string_map = parent_scope.var_to_string_map if parent_scope else {}
+        self.string_to_var_map = parent_scope.string_to_var_map if parent_scope else {}
 
     def find_variable(self, variable):
         return variable in self.variables.keys()
@@ -1251,14 +1923,17 @@ class symbolTable:
     def add_scope_to_stack(self, scope_name):
         curr_depth = self.get_current_depth()
         curr_scope = self.get_current_scope()
+
         newscope = scopeInitialiser(
-            len(self.scope_list), scope_name, curr_scope.scope_id, curr_depth
+            len(self.scope_list), scope_name, curr_scope, curr_depth
         )
         self.scope_list.append(newscope)
         self.scope_stack.append(newscope)
 
     def check_and_add_variable(self, variable, varType):
+        global var_index
         curr_scope = self.get_current_scope()
+
         if curr_scope.find_variable(variable.name):
 
             print(
@@ -1266,7 +1941,39 @@ class symbolTable:
             )
         else:
             curr_scope.variables[variable.name] = varType
-            # print(variable)
+            x = "reg" + str(var_index)  # + "@" + str(curr_scope.scope_id)
+
+            curr_scope.var_to_string_map.update({variable.name: x})
+            curr_scope.string_to_var_map.update(
+                {x: (variable, curr_scope if curr_scope else "Global")}
+            )
+            var_index += 1
+
+    def add_temp_var(self, typename="int"):
+
+        global tmp_var_index
+        global tmep_var_to_string_map, string_to_temp_var_map
+        curr_scope = self.get_current_scope()
+
+        x = "t_reg" + str(tmp_var_index)  # + "@" + str(curr_scope.scope_id)
+        curr_scope.temp_variables[x] = cppType(typename)
+
+        string_to_temp_var_map[x] = curr_scope if curr_scope else "Global"
+        tmp_var_index += 1
+
+        return x
+
+    def check_undeclared_variable(self, variable):
+        curr_scope = self.get_current_scope()
+        while curr_scope:
+            found = curr_scope.find_variable(variable.name)
+            if found:
+                break
+            curr_scope = curr_scope.parent
+        if not found:
+            print(
+                f"Undeclared variable used with name {variable.name} at line {driver.lexer.lineno}"
+            )
 
     def check_and_add_const(self, const, constType, constVal):
         curr_scope = self.get_current_scope()
@@ -1312,22 +2019,27 @@ class symbolTable:
                 f"Class re-declared with same name {className} at line no {driver.lexer.lineno}"
             )
         else:
-            self.add_scope_to_stack(str(className.name) + "_class")
+            self.add_scope_to_stack(str(className.name))
             curr_scope.classes[className.name] = className
 
     def remove_scope_from_stack(self):
-        self.scope_stack = self.scope_stack[:-1]
+        if len(self.scope_stack) > 1:
+            self.scope_stack = self.scope_stack[:-1]
 
     def savecsv(self):
         f = open("symboltable.csv", "w")
         writer = csv.writer(f)
-        writer.writerow(["entity_name", "entity_type", "scope_id", "scope_name"])
+        writer.writerow(
+            ["entity_name", "entity_type", "scope_id", "scope_name", "parent_scope_id"]
+        )
 
         for func in self.functions.keys():
-            writer.writerow([func, self.functions[func], "Function", 0, "Global"])
+            writer.writerow([func, self.functions[func], "Function", 0, "Global", None])
 
         for scope in self.scope_list:
             for var in scope.variables.keys():
+                if isinstance(scope.variables[var], list):
+                    scope.variables[var] = scope.variables[var][0]
                 writer.writerow(
                     [
                         var,
@@ -1335,6 +2047,7 @@ class symbolTable:
                         "Variable",
                         scope.scope_id,
                         scope.scope_name,
+                        scope.parent.scope_id if scope.parent else None,
                     ]
                 )
             for struct in scope.structs.keys():
@@ -1345,6 +2058,7 @@ class symbolTable:
                         "Structure",
                         scope.scope_id,
                         scope.scope_name,
+                        scope.parent.scope_id if scope.parent else None,
                     ]
                 )
             for cl in scope.classes.keys():
@@ -1355,6 +2069,7 @@ class symbolTable:
                         "Class",
                         scope.scope_id,
                         scope.scope_name,
+                        scope.parent.scope_id if scope.parent else None,
                     ]
                 )
         f.close()
@@ -1372,7 +2087,16 @@ errors = []
 global_scope = scopeInitialiser()
 symboltab = symbolTable(global_scope)
 
-allowed_native_types = ["char", "float", "int", "pointer", "string", "struct", "void"]
+allowed_native_types = [
+    "char",
+    "float",
+    "int",
+    "pointer",
+    "string",
+    "struct",
+    "void",
+    "class",
+]
 
 precedence = (
     ("nonassoc", "IF"),
@@ -1448,6 +2172,13 @@ operator_compat = {
     "++": ["int", "char", "float"],
     "--": ["int", "char", "float"],
     "func_call": ["int", "char", "float"],
+    ".": ["int", "float", "char"],
+    "==": ["int", "float", "char"],
+    "+=": ["int", "float", "char"],
+    "-=": ["int", "float", "char"],
+    "*=": ["int", "float", "char"],
+    "/=": ["int", "float", "char"],
+    "arr_index": ["int"],
 }
 
 # ------------------------ ------------------------
@@ -1470,7 +2201,7 @@ class cppType:
     def check(self):
         if len(self.typename.split("_")) > 1:
             if self.typename.split("_")[1] not in allowed_native_types:
-                raise Exception("Invalid type")
+                print("Invalid type")
         else:
             if self.typename not in allowed_native_types:
                 print(f"Invalid type {self.typename}.\n")
@@ -1484,7 +2215,7 @@ class cppType:
 
     @staticmethod
     def traverse(object):
-        return ["Variable Type:" + object.typename]
+        return [object.typename]
 
 
 class cppNode:
@@ -1545,9 +2276,8 @@ class cppNode:
                 if next != [] and next != "" and next != None:
                     graph_list.append(next.traverse(next))
 
-        # else:
-        #     print
-        #     print(f"{type(object)} type not valid")
+        else:
+            print(f"{type(object)} type not valid")
 
         return graph_list
 
@@ -1555,15 +2285,13 @@ class cppNode:
 class cppConst(cppNode):
     def __init__(
         self,
-        val: Union[
-            TypeVar("char"), TypeVar("float"), TypeVar("int"), TypeVar("string")
-        ],
-        _type: cppType = int,
+        val,
+        _type: cppType,
     ):
         self.val = val
         self._type = _type
 
-        super().__init__("constant_" + str(self._type)[1:])
+        super().__init__("constant_" + str(self._type.typename))
 
     @staticmethod
     def traverse(object):
@@ -1571,9 +2299,8 @@ class cppConst(cppNode):
 
 
 class cppId(cppNode):
-    def __init__(self, name: str, _type: cppType = TypeVar("int")):
-        super().__init__("identifier_" + str(_type)[1:], name)
-        #     return False
+    def __init__(self, name: str, _type: cppType = cppType("int")):
+        super().__init__("identifier_" + str(_type.typename if _type else "None"), name)
 
         self.name = name
         self._type = _type
@@ -1593,7 +2320,7 @@ class cppId(cppNode):
 
     @staticmethod
     def traverse(object):
-        pass
+        return ["Variable", object._type.traverse(object._type), object.name]
 
 
 class cppIdList(cppId):
@@ -1656,7 +2383,10 @@ class cppStart(cppNode):
         graph_list = ["Start"]
 
         if obj is not None:
-            for x in obj.elements[1]:
+            # print(obj.elements)
+            lis = obj.elements[1]
+            # print(lis)
+            for x in lis:
                 if x != [] and x != "" and x != None:
                     # print(x)
                     graph_list.append(x.traverse(x))
@@ -1665,25 +2395,35 @@ class cppStart(cppNode):
 
     @staticmethod
     def gen_graph(object, graph):
-        
         def generate_graph(graph, ast, node_index):
 
-            woking_index = node_index
             if isinstance(ast, tuple):
                 ast = [ast]
+
             if isinstance(ast, list):
-
+                current_index = node_index
+                # print(node_index, current_index)
+                # print(ast)
                 graph.add_node(pydot.Node(node_index, label=str(ast[0]), shape="egg"))
-
+                # if len(ast) == 3:
+                #     print('Hello')
+                #     print(ast[2])
+                # print(len(ast))
                 for x in ast[1:]:
+                    # print(x)
                     if x != []:
-                        nd = pydot.Edge(node_index, woking_index + 1)
+                        # if current_index == None:
+                        #     continue
+                        nd = pydot.Edge(node_index, current_index + 1)
                         graph.add_edge(nd)
-                        woking_index = generate_graph(graph, x, woking_index + 1)
+                        current_index = generate_graph(graph, x, current_index + 1)
+                # print(current_index)
+                return current_index
 
-                return woking_index
-
-            elif isinstance(ast, str):
+            elif isinstance(
+                ast,
+                (str, int, float, dict),
+            ):
                 nd = pydot.Node(
                     node_index,
                     label=str(ast),
@@ -1695,7 +2435,7 @@ class cppStart(cppNode):
                 print(f"{type(ast)} type not valid")
 
         ast = object.traverse(object)
-        print(ast)
+        # print(ast)
         generate_graph(graph, ast, 0)
         graph.get_node("0")[0].set_color("teal")
         return ast, graph
@@ -1708,11 +2448,6 @@ class cppStart(cppNode):
 
 class cppExpr(cppNode):
     def __init__(self, lhs: cppNode, op: cppOp, rhs: Union[cppNode, None]):
-        # if lhs:
-        #     if len(lhs.node_type.split("_")) > 1:
-        #         self.expr_type = ("expression_"+lhs.node_type).split("_")[1]
-        #     else:
-        #         self.expr_type = lhs.node_type
 
         # super().__init__("expression")
         self.lhs = lhs
@@ -1727,7 +2462,8 @@ class cppExpr(cppNode):
             operator_compat[self.op.op] if self.op is not None else allowed_native_types
         )
         self.expr_type = None
-
+        # print(lhs.node_type)
+        # print(lhs)
         if lhs and lhs.node_type:
             if len(lhs.node_type.split("_")) > 1:
                 self.expr_type = lhs.node_type.split("_")[1]
@@ -1743,7 +2479,8 @@ class cppExpr(cppNode):
         # Check lhs and rhs type compatible (binary exprs only)
         if not isinstance(self.rhs, list):
             if self.rhs is not None and self.lhs.expr_type != self.rhs.expr_type:
-
+                pass
+                # print("1766 ",self.rhs.pf_expr._type.typename,self.lhs.un_expr.pf_expr._type.typen)
                 # # Typecasting; If not possible return False
                 # # TODO: int-float typecasting priority
                 # if (
@@ -1763,15 +2500,16 @@ class cppExpr(cppNode):
                 #         f"Types {self.lhs.expr_type} and {self.rhs.expr_type} incompatible, cannot typecast.\n"
                 #     )
                 #     return False
-                print(f'Type mismatch on lhs and rhs at line {driver.lexer.lineno}')
+            #####NEED TO DISCUSS # print(f"Type mismatch on lhs and rhs at line {driver.lexer.lineno}")
         else:
             for s in self.rhs:
                 if s is not None and self.lhs.expr_type != s.expr_type:
-                    
+
                     # Typecasting; If not possible return False
                     # TODO: int-float typecasting priority
                     if (
                         self.op.op != "cast"
+                        and self.lhs.expr_type
                         and s.expr_type in typecast_compat[self.lhs.expr_type]
                     ):
                         s = cppCastExpr(s, self.lhs.expr_type)
@@ -1781,12 +2519,13 @@ class cppExpr(cppNode):
                     #     self.lhs = cppCastExpr(self.lhs, self.rhs.expr_type)
                     #     self.expr_type = self.rhs.expr_type
 
-                    else:
-                        print(self.lhs.un_expr.name, "   ", s.un_expr)
-                        print(
-                            f"Types {self.lhs.expr_type} and {s.expr_type} incompatible, cannot typecast.\n"
-                        )
-                        return False
+                    # TODO: need to check typecasting
+                    # else:
+                    #     # print(self.lhs.un_expr.name, "   ", s.un_expr)
+                    #     print(
+                    #         f"Types {self.lhs.expr_type} and {s.expr_type} incompatible, cannot typecast.\n"
+                    #     )
+                    #     return False
 
         if (
             self.op
@@ -1820,9 +2559,11 @@ class cppExpr(cppNode):
             and not isinstance(self.lhs, cppId)
             and not isinstance(self.lhs, cppConst)
             and self.lhs.expr_type not in self.op_compat_types
+            and self.lhs.expr_type is not None
+            and self.lhs.expr_type != ""
         ):
             print(
-                f"Operator {self.op} not compatible with type {self.lhs.expr_type}.\n"
+                f"Operator {self.op.op} not compatible with type {self.lhs.expr_type}.\n"
             )
             return False
 
@@ -1830,19 +2571,51 @@ class cppExpr(cppNode):
 
     @staticmethod
     def traverse(object):
-        return [object.lhs.traverse(object.lhs),object.op.traverse(object.op),object.rhs.traverse(object.rhs)]
+        return [
+            object.lhs.traverse(object.lhs),
+            object.op.traverse(object.op),
+            object.rhs.traverse(object.rhs),
+        ]
 
 
 # TODO: Array indexing and function call handling
 class cppPostfixExpr(cppExpr):
-    def __init__(self, pf_expr: cppExpr, pf_op: cppOp, pf_id: cppId = None):
+    def __init__(
+        self,
+        pf_expr: cppExpr,
+        pf_op: cppOp,
+        pf_offset: Union[cppId, cppConst] = None,
+        pf_id: cppExpr = None,
+    ):
         super().__init__(pf_expr, pf_op, pf_id)
         #     return False
 
         self.pf_expr = pf_expr
         self.pf_op = pf_op
         self.pf_id = pf_id
-        # print(self.pf_op)
+        self.pf_offset = pf_offset
+        if isinstance(pf_offset, cppId):
+            self.pf_offset = pf_offset.name
+        elif isinstance(pf_offset, cppConst):
+            self.pf_offset = pf_offset.val
+
+        self.expr_type = None
+        if isinstance(self.pf_expr, cppConst):
+            self.expr_type = self.pf_expr._type.typename
+        elif isinstance(self.pf_expr, cppId):
+            if self.pf_expr.name in symboltab.get_current_scope().variables.keys():
+                self.expr_type = (
+                    symboltab.get_current_scope().variables[self.pf_expr.name].typename
+                )
+
+        elif isinstance(self.pf_expr, cppExpr):
+            self.expr_type = self.pf_expr.expr_type
+
+        # if isinstance(self.pf_expr, cppPostfixExpr):
+        #     print("sfsfddsf")
+        #     print(self.pf_expr.pf_expr.name)
+        # else:
+        #     print(self.pf_expr.name)
         self.check_pf()
 
     def check_pf(self):
@@ -1855,9 +2628,10 @@ class cppPostfixExpr(cppExpr):
                 "int",
                 "float",
             ]
+            and self.pf_expr.expr_type != ""
         ):
             print(
-                f"Invalid operator {self.pf_op} for type {self.pf_expr.expr_type} at line {driver.lexer.lineno}.\n"
+                f"Invalid operator {self.pf_op.op} for type {self.pf_expr.expr_type} at line {driver.lexer.lineno}.\n"
             )
 
         # Only pointer to struct can have -> op
@@ -1903,24 +2677,35 @@ class cppPostfixExpr(cppExpr):
 
     @staticmethod
     def traverse(object):
-        pass
+        # pass
+        graph_list = []
+        # print(object.pf_expr)
+        # if isinstance(object.pf_expr, cppPostfixExpr):
+        if object.pf_expr is not None:
+            graph_list.append(object.pf_expr.traverse(object.pf_expr))
+        if object.pf_op is not None:
+            graph_list.append(object.pf_op.op)
+        if object.pf_offset is not None:
+            graph_list.append(object.pf_offset)
+
+        return graph_list
 
 
 class cppUnExpr(cppExpr):
     def __init__(self, un_expr: cppExpr, un_op: cppOp):
 
         super().__init__(un_expr, un_op, None)
-        #     return False
 
         self.un_expr = un_expr
         self.un_op = un_op
+        self.expr_type = self.un_expr.expr_type
 
         self.check_un()
 
     def check_un(self):
 
         # Only int / float can have unary op, if & used for pointer then var should have been inited
-        if isinstance(self.un_expr, cppCastExpr):  # Why castExpr?
+        if isinstance(self.un_expr, cppCastExpr):
             if (
                 self.un_op in ["!", "~"]
                 and self.un_expr.expr_type != "int"
@@ -1932,7 +2717,7 @@ class cppUnExpr(cppExpr):
                 )
                 return False
 
-            if self.un_op == "&" and not symboltab.get_curr_scope().find_variable(
+            if self.un_op == "&" and not symboltab.get_current_scope().find_variable(
                 self.un_expr.lhs.node_name
             ):
                 print(
@@ -1966,7 +2751,15 @@ class cppUnExpr(cppExpr):
 
     @staticmethod
     def traverse(object):
-        pass
+        # print(object)
+        graph_list = []
+        if object.un_expr is not None:
+            # print(object.un_expr)
+            graph_list.append(object.un_expr.traverse(object.un_expr))
+        if object.un_op is not None:
+            graph_list.append(object.un_op.op)
+
+        return graph_list
 
 
 class cppCastExpr(cppExpr):
@@ -1974,14 +2767,14 @@ class cppCastExpr(cppExpr):
         self, cast_expr: cppUnExpr, new_type: cppType, init_type: cppType = None
     ):
         super().__init__(cast_expr, cppOp("cast"), None)
-        #     return False
 
         self.cast_expr = cast_expr
         self.init_type = self.cast_expr.expr_type
         self.new_type = new_type
+        self.expr_type = self.new_type
 
         if self.check_cast():
-            print("reached const typing")
+            # print("reached const typing")
             if len(self.init_type.split("_")) > 1:
                 if self.init_type.split("_")[0] == "constant":
                     # print("reached const typing")
@@ -1993,8 +2786,6 @@ class cppCastExpr(cppExpr):
                 f"Invalid type {self.new_type} for typecasting variable of type {self.init_type} at line {driver.lexer.lineno}.\n"
             )
             return False
-
-        print(self.init_type)
 
         return True
 
@@ -2010,30 +2801,35 @@ class cppCastExpr(cppExpr):
 class cppArithExpr(cppExpr):
     def __init__(self, cast_lhs: cppCastExpr, cast_op: cppOp, cast_rhs: cppCastExpr):
         super().__init__(cast_lhs, cast_op, cast_rhs)
-        #     return False
 
         self.cast_lhs = cast_lhs
         self.cast_rhs = cast_rhs
         self.cast_op = cast_op
 
+        # print(self.cast_rhs.expr_type)
+
         self.check_arith()
 
     def check_arith(self):
-        print(self.rhs.expr_type)
-        print(self.lhs.expr_type)
         if self.op.op not in operators["arithmetic_op"]:
             print(
                 f"Invalid operator {self.op.op} for arithmetic expression at line {driver.lexer.lineno}.\n"
             )
             return False
 
-        if self.lhs.expr_type not in operator_compat[self.op.op]:
+        if (
+            self.lhs.expr_type not in operator_compat[self.op.op]
+            and self.lhs.expr_type != ""
+        ):
             print(
                 f"Operator {self.op.op} not compatible with type {self.lhs.expr_type} at line {driver.lexer.lineno}.\n"
             )
             return False
-        
-        if self.rhs.expr_type not in operator_compat[self.op.op]:
+
+        if (
+            self.rhs.expr_type not in operator_compat[self.op.op]
+            and self.rhs.expr_type != ""
+        ):
             print(
                 f"Operator {self.op.op} not compatible with type {self.rhs.expr_type} at line {driver.lexer.lineno}.\n"
             )
@@ -2049,7 +2845,14 @@ class cppArithExpr(cppExpr):
 
     @staticmethod
     def traverse(object):
-        pass
+        graph_list = []
+        if object.cast_lhs is not None:
+            graph_list.append(object.cast_lhs.traverse(object.cast_lhs))
+        if object.cast_op is not None:
+            graph_list.append(object.cast_op.op)
+        if object.cast_rhs is not None:
+            graph_list.append(object.cast_rhs.traverse(object.cast_rhs))
+        return graph_list
 
 
 class cppShiftExpr(cppExpr):
@@ -2070,6 +2873,7 @@ class cppShiftExpr(cppExpr):
 
     def traverse(self):
         pass
+        # return object.shift_lhs.traverse()
 
 
 class cppRelationExpr(cppExpr):
@@ -2131,7 +2935,18 @@ class cppRelationExpr(cppExpr):
 
     @staticmethod
     def traverse(object):
-        pass
+        if isinstance(object, List):
+            return [
+                object[0].rel_op.op,
+                object[0].rel_lhs.lhs.traverse(object[0].rel_lhs.lhs),
+                object[0].rel_rhs.lhs.traverse(object[0].rel_rhs.lhs),
+            ]
+        else:
+            return [
+                object.rel_op.op,
+                object.rel_lhs.lhs.traverse(object.rel_lhs.lhs),
+                object.rel_rhs.lhs.traverse(object.rel_rhs.lhs),
+            ]
 
 
 class cppLogicExpr(cppExpr):
@@ -2191,7 +3006,6 @@ class cppAssignExpr(cppExpr):
         self, unaryexpr: cppUnExpr, assign_op: cppOp, assign_expr: "cppAssignExpr"
     ):
         super().__init__(unaryexpr, assign_op, assign_expr)
-        #     return False
 
         self.unaryexpr = unaryexpr
         self.assign_op = assign_op
@@ -2215,7 +3029,14 @@ class cppAssignExpr(cppExpr):
 
     @staticmethod
     def traverse(object):
-        pass
+        graph_list = []
+        if object.unaryexpr is not None:
+            graph_list.append(object.unaryexpr.traverse(object.unaryexpr))
+        if object.assign_op.op is not None:
+            graph_list.append(object.assign_op.op)
+        if object.assign_expr is not None:
+            graph_list.append(object.assign_expr.traverse(object.assign_expr))
+        return graph_list
 
 
 # ------------------------ ------------------------
@@ -2302,8 +3123,10 @@ class cppDirectDeclarator(cppNode):
         self.arr_offset = arr_offset
         self.dec_flag = dec_flag
         self.param_list = param_list
-
+        # print(self.arr_offset)
         if self.dec_flag == 7:
+            self.name = self.dec_declarator.name
+        if self.dec_flag == 3:
             self.name = self.dec_declarator.name
 
         self.check_ddecl()
@@ -2319,6 +3142,7 @@ class cppInitDeclarator(cppNode):
         #     return False
 
         self.declarator = declarator
+        # print(self.declarator.arr_offset)
         self.initializer = initializer
         self.check_initdeclarator()
 
@@ -2386,7 +3210,12 @@ class cppDeclarator(cppNode):
         #     return False
 
         self.name = name
-        self.arr_offset = arr_offset
+        # print(ddecl)
+        if ddecl is not None:
+            self.arr_offset = ddecl.arr_offset
+        else:
+            self.arr_offset = None
+
         self.is_pointer = is_pointer
         self.ddecl = ddecl
 
@@ -2403,48 +3232,74 @@ class cppDeclarator(cppNode):
 class cppDeclaration(cppNode):
     def __init__(self, decl_type: cppType, initdecl_list: cppInitDecls):
         super().__init__("declaration")
-        #     return False
 
         self.decl_type = decl_type
         self.initdecl_list = initdecl_list
+        self.cmpd_idx = symboltab.cmpd_ctr
+        if (
+            symboltab.get_current_scope().scope_name[5:] == str(symboltab.cmpd_ctr)
+            or symboltab.get_current_scope().scope_name == "Global"
+        ):
+            symboltab.add_scope_to_stack(f"cmpd_{symboltab.cmpd_ctr+1}")
         self.check_declaration()
 
     def check_declaration(self):
         if self.initdecl_list is not None:
             for init in self.initdecl_list:
                 # Void assignment invalid
+                # print(init.declarator)
                 if self.decl_type == "void":
                     print(
                         f"Void variable {init.name} cannot be assigned a value at line {driver.lexer.lineno}.\n"
                     )
                     return False
-
                 # Array offset check
                 if (
                     init.declarator.arr_offset
-                    and init.declarator.arr_offset.node_type.split("_")[1] != "int"
+                    and init.declarator.arr_offset.pf_expr._type.typename != "int"
                 ):
                     print(
-                        f"Array offset {init.declarator.arr_offset} must be of int type at line {driver.lexer.lineno}.\n"
+                        f"Array offset {init.declarator.arr_offset.pf_expr.val} must be of int type at line {driver.lexer.lineno}.\n"
                     )
                     return False
 
                 # Redeclaring variable
+
                 if symboltab.get_current_scope().find_variable(init.declarator.name):
                     print(
                         f"Re-declared variable {init.declarator.name} at line {driver.lexer.lineno}.\n"
                     )
                     return False
-                # TODO: removed for cppId frivolous object
-                # symboltab.check_and_add_variable(init.declarator.name, self.decl_type)
+
+                symboltab.check_and_add_variable(init.declarator.name, self.decl_type)
+                init.declarator.ddecl.dec_type = self.decl_type
+                init.declarator.name._type = self.decl_type
+                init.declarator.name.node_type = "identifier_" + self.decl_type.typename
+                # print(init.declarator.name)
 
         return True
 
     @staticmethod
     def traverse(object):
         graph_list = [object.decl_type.traverse(object.decl_type)]
-        for init_decls in object.initdecl_list:
-            graph_list += init_decls.traverse(init_decls)
+
+        if object.initdecl_list is not None:
+
+            for init_decls in object.initdecl_list:
+                if init_decls.declarator.is_pointer:
+                    graph_list[0][0] = "pointer_" + graph_list[0][0]
+                if init_decls.declarator.arr_offset is not None:
+                    if isinstance(init_decls.declarator.arr_offset.pf_expr, cppConst):
+                        graph_list.append(
+                            (
+                                init_decls.traverse(init_decls),
+                                init_decls.declarator.arr_offset.traverse(
+                                    init_decls.declarator.arr_offset
+                                )[0][2],
+                            )
+                        )
+                else:
+                    graph_list += init_decls.traverse(init_decls)
         return graph_list
 
 
@@ -2490,24 +3345,25 @@ class cppCompoundStmt(cppStmt):
         #     return False
 
         self.cmpd_decls = cmpd_decls
+
         self.cmpd_stmts = cmpd_stmts
-        self.stmt = [cmpd_decls,cmpd_stmts]
-        self.cmpd_idx = symboltab.cmpd_ctr
+        self.stmt = [cmpd_decls, cmpd_stmts]
+
+        self.idx = cmpd_decls[0].cmpd_idx if cmpd_decls is not None else 0
 
         # TODO: Compound statement own scope
         # TODO: add variables in decls
         # TODO: checking return as last stmt
-        symboltab.add_scope_to_stack(f"cmpd_{self.cmpd_idx}")
-        symboltab.cmpd_ctr += 1
 
-        if self.cmpd_decls is not None:
-            for decl in self.cmpd_decls:
-                decl_type = decl.decl_type
+        # if self.cmpd_decls is not None:
+        #     for decl in self.cmpd_decls:
+        #         decl_type = decl.decl_type
 
-                for dec_n in decl.initdecl_list:
-                    if dec_n.declarator.is_pointer:
-                        decl_type = cppType(f"pointer_{decl_type.typename}")
-                    symboltab.check_and_add_variable(dec_n.declarator.name, decl_type)
+        #         for dec_n in decl.initdecl_list:
+        #             if dec_n.declarator.is_pointer:
+        #                 decl_type = cppType(f"pointer_{decl_type.typename}")
+        #             symboltab.check_and_add_variable(dec_n.declarator.name, decl_type)
+
         # print(self.stmt)
         # symboltab.remove_scope_from_stack()
 
@@ -2515,9 +3371,28 @@ class cppCompoundStmt(cppStmt):
 
     # TODO: add type checking consistently
     def check_cmpd(self):
-        # return isinstance(self.cmpd_decls, list) and isinstance(
-        #     self.cmpd_stmts, List[cppStmt]
-        # )
+        if self.cmpd_stmts:
+            for ostm in self.cmpd_stmts:
+                if not isinstance(
+                    ostm, (cppCompoundStmt, cppIterateStmt, cppJumpStmt, cppSelectStmt)
+                ):
+                    for stm in ostm:
+                        if isinstance(stm, cppPostfixExpr):
+                            symboltab.check_undeclared_variable(stm.pf_expr.pf_expr)
+
+                        elif isinstance(stm, cppAssignExpr):
+                            if isinstance(stm.unaryexpr.un_expr.pf_expr, cppId):
+                                symboltab.check_undeclared_variable(
+                                    stm.unaryexpr.un_expr.pf_expr
+                                )
+
+                            elif isinstance(stm.assign_expr.un_expr.pf_expr, cppId):
+                                # print(stm.assign_expr.un_expr.pf_expr.name)
+                                symboltab.check_undeclared_variable(
+                                    stm.assign_expr.un_expr.pf_expr
+                                )
+                        # print(f"Undeclared Variable referenced: {stm.unaryexpr.un_expr.pf_expr.name}")
+
         return True
 
     @staticmethod
@@ -2529,8 +3404,12 @@ class cppCompoundStmt(cppStmt):
                 graph_list.append(cmpd_decl.traverse(cmpd_decl))
         if object.cmpd_stmts is not None:
             for cmpd_stmt in object.cmpd_stmts:
-                # print(cmpd_stmt.traverse(cmpd_stmt))
-                graph_list.append(cmpd_stmt.traverse(cmpd_stmt))
+                if isinstance(cmpd_stmt, List):
+                    for s in cmpd_stmt:
+                        # print(s)
+                        graph_list.append(s.traverse(s))
+                else:
+                    graph_list.append(cmpd_stmt.traverse(cmpd_stmt))
         return graph_list
 
 
@@ -2548,9 +3427,7 @@ class cppExprStmt(cppStmt):
 
     @staticmethod
     def traverse(obj):
-        return [
-            obj.e_expr.traverse(obj.e_expr)
-       ]
+        return [obj.e_expr.traverse(obj.e_expr)]
 
 
 class cppSelectStmt(cppStmt):
@@ -2566,7 +3443,8 @@ class cppSelectStmt(cppStmt):
         self.select_expr = select_expr
         self.select_if_stmt = select_if_stmt
         self.select_else_stmt = select_else_stmt
-        self.stmt = [select_expr,select_if_stmt,select_else_stmt]
+        self.stmt = [select_expr, select_if_stmt, select_else_stmt]
+
     def check_selectstmt(self):
         return (
             isinstance(self.select_expr, cppExpr)
@@ -2576,13 +3454,15 @@ class cppSelectStmt(cppStmt):
 
     @staticmethod
     def traverse(object):
-        graph_list =  ["if",object.select_expr.traverse(object.select_expr)]
+        # print(object.select_expr[0].rel_lhs)
+        graph_list = ["if", object.select_expr[0].traverse(object.select_expr)]
         if object.select_if_stmt is not None:
-            graph_list.append(object.if_stmt.traverse(object.if_stmt))
+            graph_list.append(object.select_if_stmt.traverse(object.select_if_stmt))
         if object.select_else_stmt is not None:
-            graph_list.append(object.else_stmt.traverse(object.else_stmt))
+            graph_list.append(object.select_else_stmt.traverse(object.select_else_stmt))
 
         return graph_list
+
 
 class cppIterateStmt(cppStmt):
     def __init__(
@@ -2603,14 +3483,14 @@ class cppIterateStmt(cppStmt):
         self.iter_update_expr = iter_update_expr
 
         self.body_stmt = body_stmt
-        self.stmt = [iter_type,iter_init_stmt,iter_check_stmt,iter_update_expr]
+        self.stmt = [iter_type, iter_init_stmt, iter_check_stmt, iter_update_expr]
         # TODO: Initialize variable in loop statement and add to compound statement scope
         if self.iter_type == "for_init":
             i_type = self.iter_init_stmt[0]
             i_init = cppInitializer(self.iter_init_stmt[1])
             idx = 0
             for i, scope in enumerate(symboltab.scope_list):
-                if scope.scope_name == f"cmpd_{body_stmt.cmpd_idx}":
+                if scope.scope_name == f"cmpd_{body_stmt.idx}":
                     idx = i
                     break
             symboltab.scope_stack.append(symboltab.scope_list[idx])
@@ -2618,11 +3498,6 @@ class cppIterateStmt(cppStmt):
                 i_init.init_expr[0].unaryexpr.un_expr.pf_expr, i_type
             )
             symboltab.scope_stack.pop()
-
-            # filter(
-            #     lambda scope: scope.scope_name == f"cmpd_{body_stmt.cmpd_idx}",
-            #     symboltab.scope_list,
-            # )[0].check_and_add_var(i_init.var.name)
 
         self.check_iterstmt()
 
@@ -2636,14 +3511,36 @@ class cppIterateStmt(cppStmt):
 
     @staticmethod
     def traverse(object):
+        # print(object.iter_init_stmt)
+        graph_list = [object.iter_type]
+        if object.iter_init_stmt is not None:
+            graph_list.append(
+                object.iter_init_stmt[0].traverse(object.iter_init_stmt[0])
+            )
+            if len(object.iter_init_stmt) > 1:
+                for i in range(len(object.iter_init_stmt[1])):
+                    if object.iter_init_stmt[1][i] is not None:
+                        graph_list.append(
+                            object.iter_init_stmt[1][i].traverse(
+                                object.iter_init_stmt[1][i]
+                            )
+                        )
+        if object.iter_check_stmt is not None:
+            for s in object.iter_check_stmt:
+                graph_list.append(s.traverse(s))
+        if object.iter_update_expr is not None:
+            for s in object.iter_update_expr:
+                graph_list.append(s.traverse(s))
 
-        return [
-            object.iter_type,
-            object.iter_init_stmt.traverse(object.iter_init_stmt),
-            object.iter_check_stmt.traverse(object.iter_check_stmt),
-            object.iter_update_expr.traverse(object.iter_update_expr),
-            [],
-        ]
+        graph_list.append(object.body_stmt.traverse(object.body_stmt))
+        # return [
+        #     object.iter_type,
+        #     object.iter_init_stmt.traverse(object.iter_init_stmt),
+        #     object.iter_check_stmt.traverse(object.iter_check_stmt),
+        #     object.iter_update_expr.traverse(object.iter_update_expr),
+        #     [],
+        # ]
+        return graph_list
 
 
 class cppJumpStmt(cppStmt):
@@ -2653,7 +3550,7 @@ class cppJumpStmt(cppStmt):
 
         self.jump_type = jump_type
         self.jump_expr = jump_expr
-        self.stmt = [jump_type,jump_expr]
+        self.stmt = [jump_type, jump_expr]
         self.check_jumpstmt()
 
     def check_jumpstmt(self):
@@ -2664,10 +3561,10 @@ class cppJumpStmt(cppStmt):
             return False
 
         if self.jump_type == "break":
-            scope = symboltab.get_curr_scope()
+            scope = symboltab.get_current_scope()
             flag = False
             while scope:
-                if scope.name == "loop":
+                if scope.scope_name == "loop":
                     flag = True
                 scope = scope.parent
             if not flag:
@@ -2677,10 +3574,10 @@ class cppJumpStmt(cppStmt):
                 return False
 
         elif self.jump_type == "continue":
-            scope = symboltab.get_curr_scope()
+            scope = symboltab.get_current_scope()
             flag = False
             while scope:
-                if scope.name == "loop":
+                if scope.scope_name == "loop":
                     flag = True
                 scope = scope.parent
             if not flag:
@@ -2691,7 +3588,7 @@ class cppJumpStmt(cppStmt):
 
     @staticmethod
     def traverse(object):
-        pass
+        return [object.jump_type, object.jump_expr.traverse(object.jump_expr)]
 
 
 class cppLabelStmt(cppStmt):
@@ -2701,7 +3598,7 @@ class cppLabelStmt(cppStmt):
 
         self.label_id = label_id
         self.label_stmt = label_stmt
-        self.stmt = [label_id,label_stmt]
+        self.stmt = [label_id, label_stmt]
         # TODO: add label to symbol table in the current scope
 
         self.check_labelstmt()
@@ -2741,15 +3638,37 @@ class cppParamDeclaration(cppNode):
         self, pdec_type: cppType, pdec_param: Union[cppAbsDeclarator, cppDeclarator]
     ):
         super().__init__("param_declaration")
-        #     return False
 
         self.pdec_type = pdec_type
         self.pdec_param = pdec_param
+        self.pdec_param.name._type = self.pdec_type
 
         self.check_pdec()
 
     def check_pdec(self):
         return True
+
+
+stack_space = {}
+saved_reg = {}
+
+
+def write_activation():
+    global stack_space
+    with open("activation_record.csv", "w") as f_w:
+        writer = csv.writer(f_w)
+        writer.writerow(
+            [
+                "Function name",
+                "Local / Param",
+                "Variable name",
+                "Variable size",
+                "Old Stack pointer size",
+            ]
+        )
+        for func in stack_space.keys():
+            for var in stack_space[func]:
+                writer.writerow([func, var["location"], var["name"], var["size"], 4])
 
 
 class cppFuncDef(cppNode):
@@ -2759,6 +3678,7 @@ class cppFuncDef(cppNode):
         func_decl: cppDeclarator,
         func_stmt: cppCompoundStmt,
     ):
+        global stack_space, f
         super().__init__("function_definition")
 
         self.func_type = func_type
@@ -2766,9 +3686,8 @@ class cppFuncDef(cppNode):
         self.func_param_list = func_decl.ddecl.param_list
         self.func_stmt = func_stmt
         self.func_nparams = len(self.func_param_list) if self.func_param_list else 0
-        # print("funcstmt", self.func_stmt.cmpd_stmts.)
 
-        self.scope_id = func_stmt.cmpd_idx
+        self.scope_id = func_stmt.idx
 
         idx = 0
         for i, l_scope in enumerate(symboltab.scope_list):
@@ -2776,19 +3695,60 @@ class cppFuncDef(cppNode):
                 idx = i
                 break
 
-        symboltab.scope_stack.append(symboltab.scope_list[idx])
+        stack_space[self.func_name.name] = []
+        saved_reg[self.func_name.name] = []
+
+        # if os.path.exists("activation.csv"):
+        #     os.remove("activation.csv")
+        if self.func_param_list:
+            for prm in self.func_param_list:
+                stack_space[self.func_name.name].append(
+                    {
+                        "name": prm.pdec_param.name.name,
+                        "size": dtype_size[prm.pdec_type.typename],
+                        "is_return": False,
+                        "location": "param",
+                    }
+                )
+        if self.func_stmt.cmpd_decls:
+            for decl in self.func_stmt.cmpd_decls:
+                var_type = decl.decl_type
+                for var in decl.initdecl_list:
+                    stack_space[self.func_name.name].append(
+                        {
+                            "name": var.declarator.name.name,
+                            "size": dtype_size[var_type.typename],
+                            "is_return": False,
+                            "location": "local",
+                        }
+                    )
+
+        return_expr = None
+        for stmt in self.func_stmt.cmpd_stmts:
+            if isinstance(stmt, cppJumpStmt) and stmt.jump_type == "return":
+                return_expr = stmt.jump_expr
+                break
+
+        # Check return expr type
+        if return_expr and return_expr.expr_type != self.func_type.typename:
+            print(
+                f"Return Types {return_expr.expr_type}, {self.func_type.typename} mismatch.\n"
+            )
+
+        # symboltab.scope_stack.append(symboltab.scope_list[idx])
         # print(self.func_param_list, self.func_name, self.func_type)
 
         symboltab.check_and_add_function(
             self.func_name, self.func_type, self.func_nparams, self.scope_id
         )
+
         if self.func_param_list is not None:
             for param in self.func_param_list:
                 p_type = param.pdec_type
                 p_name = param.pdec_param.name
                 # print(p_name)
                 symboltab.check_and_add_variable(p_name, p_type)
-        symboltab.scope_stack.pop()
+        # symboltab.scope_stack.pop()
         self.check_func_def()
 
     def check_func_def(self):
@@ -2796,13 +3756,19 @@ class cppFuncDef(cppNode):
 
     @staticmethod
     def traverse(object):
-        return [
+        # print(cppNode.traverse(object.func_param_list))
+        graph_list = [
             "Function_Declaration",
             object.func_type.traverse(object.func_type),
             object.func_name.name,
-            cppNode.traverse(object.func_param_list),
-            object.func_stmt.traverse(object.func_stmt),
         ]
+        if object.func_param_list is not None:
+            for i in object.func_param_list:
+                # print(i.pdec_type.typename,i.pdec_param.name.name)
+                graph_list.append(i.pdec_param.name.traverse(i.pdec_param.name))
+        graph_list.append(object.func_stmt.traverse(object.func_stmt))
+
+        return graph_list
 
 
 class cppBaseSpec(cppNode):
@@ -2834,7 +3800,6 @@ class cppMemberDeclaration(cppNode):
         self.memberdecl_list = memberdecl_list
         self.member_type = member_type
         self.member_access = member_access
-
         self.check_member_dec()
 
     def check_member_dec(self):
@@ -2851,20 +3816,23 @@ class cppMemberDeclaration(cppNode):
                 return False
 
             # Array offset check
-            if memb.declarator.arr_offset.node_type.split("_")[1] != "int":
+            if (
+                memb.declarator.arr_offset is not None
+                and memb.declarator.arr_offset.node_type.split("_")[1] != "int"
+            ):
                 print(
                     f"Array offset {memb.declarator.arr_offset} must be of int type at line {driver.lexer.lineno}.\n"
                 )
                 return False
 
             # Redeclaring variable
-            if symboltab.get_curr_scope().find_variable(memb.name):
+            if symboltab.get_current_scope().find_variable(memb.declarator.name):
                 print(
-                    f"Re-declared variable {memb.name} at line {driver.lexer.lineno}.\n"
+                    f"Re-declared variable {memb.declarator.name} at line {driver.lexer.lineno}.\n"
                 )
                 return False
-
-            symboltab.get_curr_scope().check_and_add_variable(memb.name, self.decl_type)
+            # print(memb.declarator.name.name)
+            # symboltab.check_and_add_variable(memb.declarator.name, self.decl_type)
 
         return True
 
@@ -2919,12 +3887,11 @@ class cppFunction(cppNode):
         pass
 
 
-class cppStructDeclarator(cppNode):
-    def __init__(self, s_declarator: cppDeclarator, s_con_expr: cppCondExpr):
-        super().__init__("struct_declarator")
-        #     return False
-
-        self.s_declarator = s_declarator
+class cppStructDeclarator(cppDeclarator):
+    def __init__(self, s_declarator: cppDeclarator, s_con_expr: cppCondExpr = None):
+        super().__init__(s_declarator.name)
+        # print(f'3004 {self.name}')
+        self.declarator = s_declarator
         self.s_con_expr = s_con_expr
 
         self.check_s_declarator()
@@ -2936,20 +3903,31 @@ class cppStructDeclarator(cppNode):
 # TODO:
 class cppStructDeclaration(cppDeclaration):
     def __init__(
-        self, s_declaration: List[cppType], s_declarator_list: List[cppStructDeclarator]
+        self, s_specifier: List[cppType], s_declarator_list: List[cppStructDeclarator]
     ):
-        super().__init__("struct")
-        self.s_declaration = s_declaration
+        super().__init__(s_specifier, s_declarator_list)
+        self.s_specifier = s_specifier
         self.s_declarator_list = s_declarator_list
-
+        # print(s_declarator_list[0].name.name,s_declarator_list[1].name.name)
         self.s_declaration_check()
 
     def s_declaration_check(self):
         return True
 
+    @staticmethod
+    def traverse(object):
+        graph_list = []
+        if object.s_declarator_list is not None:
+            for d in object.s_declarator_list:
+                graph_list.append(d.name.traverse(d.name))
+
+        return graph_list
+
 
 class cppStruct(cppNode):
-    def __init__(self, s_tag: cppId, s_id: cppId, s_decls: List[cppDeclaration] = None):
+    def __init__(
+        self, s_tag: cppId, s_id: cppId, s_decls: List[cppStructDeclaration] = None
+    ):
         super().__init__("struct")
         #     return False
 
@@ -2962,17 +3940,18 @@ class cppStruct(cppNode):
 
         # Extract variables from declarations to add to symboltable scope
         self.s_vars = []
-        for s_decl in s_decls:
-            s_type = s_decl.decl_type
+        if s_decls is not None:
+            for s_decl in s_decls:
+                s_type = s_decl.decl_type
 
-            s_initdecl_list = s_decl.initdecl_list
-            for s_initdecl in s_initdecl_list:
-                self.s_vars.append((s_initdecl.declarator.name, s_type))
+                s_initdecl_list = s_decl.initdecl_list
+                for s_initdecl in s_initdecl_list:
+                    self.s_vars.append((s_initdecl.declarator.name, s_type))
 
-        for s_var in self.s_vars:
-            symboltab.check_and_add_variable(s_var[0], s_var[1])
+            for s_var in self.s_vars:
+                symboltab.check_and_add_variable(s_var[0], s_var[1])
 
-        symboltab.remove_scope_from_stack()
+            symboltab.remove_scope_from_stack()
 
         self.check_struct()
 
@@ -2982,6 +3961,7 @@ class cppStruct(cppNode):
     @staticmethod
     def traverse(object):
         pass
+        # print(s_decls[0].s_declarator_list[1].declarator.name.name)
 
 
 class cppClass(cppNode):
@@ -3024,10 +4004,10 @@ class cppClass(cppNode):
         self.c_vars = []
 
         if self.c_vardecs is not None:
-            for c_decl, c_var_access in self.c_vardec:
+            for c_decl, c_var_access in self.c_vardecs:
                 c_type = c_decl.decl_type
 
-                c_initdecl_list = c_decl.initdecl_list
+                c_initdecl_list = c_decl.memberdecl_list
                 for c_initdecl in c_initdecl_list:
                     self.c_vars.append((c_initdecl.declarator.name, c_type))
 
@@ -3143,7 +4123,6 @@ ap.add_argument("-m", "--mode", type=str, help="lexer or parser", default="parse
 
 args = vars(ap.parse_args())
 
-
 class Parser:
     def __init__(self, file):
         self.file = file
@@ -3199,12 +4178,13 @@ driver = Parser(f"tests/semantic/test_{args['num']}.cpp")
 if args["mode"] == "parse":
     driver.run_parse()
     symboltab.savecsv()
-    # ast1 = cppStart.traverse(driver.tree)
+    write_activation()
+    # print(driver.tree)
+    ast1 = cppStart.traverse(driver.tree["data"])
     # print(ast)
-    # graph = pydot.Dot("AST", graph_type="graph")
-    # ast, graph = cppStart.gen_graph(driver.tree, graph)
-    # graph.write_png("AST.png")
-
+    graph = pydot.Dot("AST", graph_type="graph")
+    ast, graph = cppStart.gen_graph(driver.tree["data"], graph)
+    graph.write_png("AST.png")
 elif args["mode"] == "lex":
     driver.run_lex()
     driver.print_tokens()

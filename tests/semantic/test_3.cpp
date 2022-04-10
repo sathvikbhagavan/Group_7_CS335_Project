@@ -6,6 +6,7 @@ int func(int a, int b, int c){
 
 int main() {
 
-    int cc = func(2,3);
+    int cc;
+    cc = func(2,3,1);
     return 0;
 }
