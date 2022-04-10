@@ -1,0 +1,14 @@
+entity_name,entity_type,scope_id,scope_name
+func,"('int', 3)",Function,0,Global
+main,"('int', 0)",Function,0,Global
+l,float,Variable,1,cmpd_0
+a,int,Variable,1,cmpd_0
+b,int,Variable,1,cmpd_0
+c,int,Variable,1,cmpd_0
+n,int,Variable,2,cmpd_1
+p,int,Variable,3,cmpd_2
+n,int,Variable,3,cmpd_2
+cc,int,Variable,6,cmpd_5
+t,pointer_int,Variable,6,cmpd_5
+t1,pointer_float,Variable,6,cmpd_5
+t2,float,Variable,6,cmpd_5
