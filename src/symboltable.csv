@@ -1,0 +1,6 @@
+entity_name,entity_type,entity_size,scope_name,parent_scope_name,variable_alias
+main,Function,"('int', 0, None)",Global,
+x,int,4,Variable,cmpd_0,Global,reg0
+y,float,4,Variable,cmpd_0,Global,reg1
+z,int,4,Variable,cmpd_0,Global,reg2
+g,int,4,Variable,cmpd_0,Global,reg3

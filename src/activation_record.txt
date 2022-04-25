@@ -1,0 +1,13 @@
+Function: main
+Parameters: []
+Variables: ['reg0', 'reg1', 'reg2', 'reg3']
+Register: temp_reg int
+Register: reg int 0
+Register: temp_reg float
+Register: reg float 0
+Register: reg int 0
+Register: reg int 0
+Register: temp_reg float
+Register: temp_reg string
+Register: temp_reg int
+Register: temp_reg int

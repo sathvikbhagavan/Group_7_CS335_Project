@@ -1,3 +1,5 @@
+# from ply.lex import lex
+
 # reserved keywords
 reserved = {
     "void": "VOID",
@@ -40,6 +42,7 @@ reserved = {
     "strrev": "STRING_REVERSE",
     "strlen": "STRING_LENGTH",
     "strcmp": "STRING_COMPARE",
+    "assert": "ASSERT"
 }
 
 # list of tokens
@@ -47,6 +50,7 @@ tokens = list(reserved.values()) + [
     "MULTILINE_COMMENT",
     "UNSIGNED_INT",
     "LONG_LONG_INT",
+    # "ELSE_IF",
     "DECIMAL_NUMBER",
     "NUMBER",
     "STRING_LITERAL",
@@ -194,6 +198,12 @@ def t_UNSIGNED_INT(t):
 def t_LONG_LONG_INT(t):
     r"long[ ]long[ ]int"
     return t
+
+
+# def t_ELSE_IF(t):
+#     r"else[ ]if"
+#     return t
+
 
 def t_IDENTIFIER(t):
     r"[a-zA-Z_][a-zA-Z0-9_]*"

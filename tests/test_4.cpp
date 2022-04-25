@@ -1,24 +1,18 @@
 int main() {
-    int n = 3;
-    bool flag = true;
+  int x, y;
+  int *ptr;
+  int *ptr1;
 
-    for(int i=0; i<1; i++) {
-        
-        if (i % n == 0) {
-            goto l;
-        }
-        else if(i % n == 1)
-        {
-            n++;
-            continue;
-        }
-        else {
-            break;
-        }
-    }
+  ptr = &x;
+  x = 10;
+  y = *ptr;
+  assert(y == 10);
 
-    l: n=1;
-    
-    return 0;
-    
+  y++;
+  x += 10;
+  ptr1 = ptr;
+  y = *ptr1;
+  output(y);
+
+  return 0;
 }

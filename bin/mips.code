@@ -1,0 +1,17 @@
+Function_Label: main int
+Function_related
+constant_assignment reg0 1
+constant_assignment reg1 2.0
+constant_assignment reg2 0
+constant_assignment reg3 0
+- t_reg2 reg1 reg0
+assignment_expression reg2 t_reg2
+outputvar reg2
+outputstr0 "\n"
+input reg3
+constant_assignment t_reg4 1
+- reg3 reg3 t_reg4
+outputvar reg3
+constant_assignment t_reg5 0
+return t_reg5
+main_end

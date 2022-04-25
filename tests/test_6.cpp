@@ -1,13 +1,16 @@
-int main(void) {  
-    
-    int f1 = open("demo.txt", "r+");
-    double arg = read(f1);
-    float sine = sin(arg);
-    float cosine = cos(arg);
-    if(tan(arg)==sine/cosine && sqrt(sine*sine + cosine*cosine) == 1){
-        output("correct formula");
+struct A{
+    int x;
+};
+
+int main() {
+    int x = -1;
+    if(x == 1 || x == -1) {
+        if (x > 0) {
+            output("Yes!");
+        }
+        else {
+            output("No!");
+        }
     }
-    else{
-        output("error");
-    }
-}    
+    return 0;
+}

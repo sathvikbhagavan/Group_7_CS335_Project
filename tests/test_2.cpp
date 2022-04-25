@@ -1,22 +1,18 @@
-// this is a comment
-
-/*
-    This is a comment
-*/
-
-class A {
-    private:
-        struct B{
-            int a;
-        };
-        int x;
-};
+int factorial(int a){
+    int k,t;
+    if(a==1){
+        return 1;
+    }
+    t = a-1;
+    k = factorial(t);
+    return a*k;
+}
 
 
 int main() {
-    class A a;
-    input(x1);
-    input(a1);
-    a.set(a1, x1);
+    int x=7;
+    int ans;
+    ans = factorial(x);
+    output(ans);
     return 0;
 }

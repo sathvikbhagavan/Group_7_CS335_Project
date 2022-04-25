@@ -1,0 +1,18 @@
+main | 
+    Func_Start : Stack_space 16
+    reg0 = 1
+    reg1 = 2.0
+    reg2 = 0
+    reg3 = 0
+    t_reg2 = reg1 - reg0
+    reg2 = t_reg2
+    output reg2
+    t_reg3 = "\n"
+    output t_reg3
+    input reg3
+    t_reg4 = 1
+    reg3 = reg3 - t_reg4
+    output reg3
+    t_reg5 = 0
+    return t_reg5
+    Func_End

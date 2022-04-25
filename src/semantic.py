@@ -1,22 +1,23 @@
-from curses import initscr
-from typing import List, Union, TypeVar
-from numpy import isin
+from distutils.log import error
+from typing import List, Union
 import pydot
 import csv
 import pandas as pd
 import pydot
+import pickle
 from lexer import *
 from ply.lex import lex
 from ply.yacc import yacc, NullLogger
 import argparse
-import string
-import os
 
-
+curr_param = []
+tmp_func = []
+output_cntr = 0
 tmp_var_index = 0
 string_to_temp_var_map = {}
-
+register_type = {}
 var_index = 0
+errors_found = 0
 
 precedence = (
     ("nonassoc", "IF"),
@@ -30,7 +31,16 @@ precedence = (
 # ------------------------ ------------------------
 
 
-dtype_size = {"int": 4, "float": 8, "char": 1}
+dtype_size = {
+    "int": 4,
+    "float": 4,
+    "char": 1,
+    "pointer_int": 4,
+    "pointer_float": 4,
+    "pointer_char": 4,
+}
+
+global_structs = {}
 
 
 def get_stack_size(func_name):
@@ -46,33 +56,55 @@ def p_start(p):
     """
     start : translation_unit
     """
+    global errors_found
     p[0] = {}
     p[0]["code"] = []
     p[0]["data"] = cppStart(p[1]["data"])
     if "code" in p[1].keys():
         p[0]["code"] = p[1]["code"]
-    print(p[0]["code"])
+    if "instr" in p[1].keys():
+        p[0]["instr"] = p[1]["instr"]
 
-    with open("3AC.code", "w") as f:
+    if errors_found > 0:
+        print(
+            f"\nThere are {errors_found} errors detected. Not able to generate assembly code"
+        )
+        exit(2)
+
+    filehandler = open("src/register_type.obj", "wb")
+    pickle.dump(register_type, filehandler)
+    with open("bin/3AC.code", "w") as f:
         for i in p[0]["code"]:
-            # f.write(i)
             if isinstance(i, list):
                 f.write(i[0])
                 f.write("\n")
             else:
                 f.write(i)
                 f.write("\n")
-            # print(i[0])
+    with open("bin/mips.code", "w") as f:
+        for i in p[0]["instr"]:
+            if isinstance(i, list):
+                f.write((" ").join(i))
+                f.write("\n")
+            else:
+                f.write(i)
+                f.write("\n")
 
 
 def p_error(p):
-    print(f"Error at token: {p.value}")
+    global errors_found
+    if p is not None:
+        print(f"Syntax error at token {p.value} at {driver.lexer.lineno}")
+    else:
+        print(f"Empty File!")
+    errors_found += 1
 
 
 def p_predefined_functions(p):
     """
     predefined_functions : INPUT
-                        | OUTPUT
+                        | output
+                        | input
                         | SQUARE_ROOT
                         | SIN
                         | COS
@@ -85,29 +117,51 @@ def p_predefined_functions(p):
                         | READ
                         | OPEN
     """
+    result = ""
     p[0] = {}
-    if p[1] in [
-        "INPUT",
-        "OUTPUT",
-        "READ",
-        "WRITE",
-        "OPEN",
-        "SIN",
-        "COS",
-        "TAN",
-        "SQUARE_ROOT",
-    ]:
-        result = cppPredefFunc(p[1].lower())
-    elif p[1] == "strcpy":
-        result = cppPredefFunc("strcpy")
-    elif p[1] == "strev":
-        result = cppPredefFunc("strev")
-    elif p[1] == "strlen":
-        result = cppPredefFunc("strlen")
-    elif p[1] == "strcmp":
-        result = cppPredefFunc("strcmp")
+    if p[1]["data"][0] == "output":
+        result = p[1]["data"][1]
+    elif p[1]["data"][0] == "input":
+        result = p[1]["data"][1]
 
+    p[0]["code"] = p[1]["code"]
+    p[0]["instr"] = p[1]["instr"]
+    if "place" in p[1].keys():
+        p[0]["place"] = p[1]["place"]
     p[0]["data"] = ("predefined_functions", result)
+
+
+def p_output(p):
+    """output : OUTPUT LEFT_PARENTHESIS primary_expression RIGHT_PARENTHESIS"""
+    p[0] = {}
+    global output_cntr
+    if isinstance(p[3]["data"][1], cppConst):
+        if isinstance(p[3]["data"][1].val, str):
+            p[0]["instr"] = [[f"outputstr{output_cntr}", str(p[3]["data"][1].val)]]
+        else:
+            p[0]["instr"] = [
+                [f"outputstr{output_cntr}", '"' + str(p[3]["data"][1].val) + '"']
+            ]
+        output_cntr += 1
+    else:
+        p[0]["instr"] = p[3]["instr"] + [[f"outputvar", p[3]["place"]]]
+
+    p[0]["code"] = p[3]["code"] + ["    output " + p[3]["place"]]
+    p[0]["data"] = ("output", p[3]["data"][1])
+
+
+def p_input(p):
+    """input : INPUT LEFT_PARENTHESIS primary_expression RIGHT_PARENTHESIS"""
+    global errors_found
+    p[0] = {}
+    if not isinstance(p[3]["data"][1], cppId):
+        print(
+            f"invalid parameter of type {p[3]['data'][1].__class__.__name__} in input function"
+        )
+        errors_found += 1
+    p[0]["instr"] = p[3]["instr"] + [["input", p[3]["place"]]]
+    p[0]["code"] = p[3]["code"] + ["    input " + p[3]["place"]]
+    p[0]["data"] = ("input", p[3]["data"][1])
 
 
 def p_primary_expression(p):
@@ -117,45 +171,50 @@ def p_primary_expression(p):
         | string
         | LEFT_PARENTHESIS expression RIGHT_PARENTHESIS
         | predefined_functions
-    """
 
+    """
+    #
     p[0] = {}
     result = ""
-
     if not isinstance(p[1], (str, int, float)) and (
         p[1]["data"][0] == "constant"
         or p[1]["data"][0] == "string"
-        or p[1]["data"][0] == "predefined_functions"
+        # or p[1]["data"][0] == "predefined_functions"
     ):
         result = p[1]["data"][1]
-
         p[0]["place"] = symboltab.add_temp_var(p[1]["data"][1]._type.typename)
         p[0]["code"] = ["    " + p[0]["place"] + " = " + str(p[1]["data"][1].val)]
+        register_type[p[0]["place"]] = ("temp_reg", p[1]["data"][1]._type.typename)
+        p[0]["instr"] = [
+            ["constant_assignment", p[0]["place"], str(p[1]["data"][1].val)]
+        ]
     elif p[1] == "(":
         result = p[2]["data"][1]
 
         if "code" in p[2].keys():
             p[0]["code"] = p[2]["code"]
+            p[0]["instr"] = p[2]["instr"]
         if "place" in p[2].keys():
             p[0]["place"] = p[2]["place"]
 
-    else:
+    elif isinstance(p[1], dict) and p[1]["data"][0] == "predefined_functions":
+        p[0]["code"] = p[1]["code"]
+        p[0]["instr"] = p[1]["instr"]
+        if "place" in p[1].keys():
+            p[0]["place"] = p[1]["place"]
+        result = p[1]["data"][1]
 
+    else:
         if p[1] in symboltab.get_current_scope().var_to_string_map.keys():
             p[0]["place"] = symboltab.get_current_scope().var_to_string_map[p[1]]
         else:
             p[0]["place"] = symboltab.add_temp_var("int")
         p[0]["code"] = []
-
-        # curr_scope = symboltab.get_current_scope()
-        # print(curr_scope.string_to_var_map[curr_scope.var_to_string_map[p[1]]][0].name)
-        # if p[1] not in curr_scope.var_to_string_map:
-        #     print(f"Using undeclared variable at line number: {driver.lexer.lineno}")
-
-        # elif curr_scope.variables[p[1]] is not None:
-        # # print(curr_scope.string_to_var_map)
-        result = cppId(p[1])
-        # print(result=="")
+        p[0]["instr"] = []
+        if p[1] not in symboltab.get_current_scope().variables.keys():
+            result = cppId(p[1])
+        else:
+            result = cppId(p[1], symboltab.get_current_scope().variables[p[1]])
     p[0]["data"] = ("primary_expression", result)
 
 
@@ -172,8 +231,8 @@ def p_constant(p):
 
     if isinstance(p[1], int):
         result = cppConst(p[1], cppType("int"))
-    elif p[1] in range(ord("a"), ord("z") + 1) or p[1] in range(ord("A"), ord("Z") + 1):
-        result = cppConst(p[1], cppType("char"))
+    elif isinstance(p[1], str) and len(p[1]) == 3:
+        result = cppConst(ord(p[1][1]), cppType("char"))
     elif p[1] == "true" or p[1] == "false":
         result = cppConst(p[1], cppType("bool"))
     else:
@@ -204,92 +263,347 @@ def p_postfix_expression(p):
                        | postfix_expression PLUS_PLUS
                        | postfix_expression MINUS_MINUS
     """
+    global tmp_func
+    global errors_found
     p[0] = {}
-
     result = None
     if p[1]["data"][0] == "primary_expression":
-        # print(p[1]["data"][1]=="")
         result = cppPostfixExpr(p[1]["data"][1], None)
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"].copy()
+            p[0]["instr"] = p[1]["instr"].copy()
         if "place" in p[1].keys():
             p[0]["place"] = p[1]["place"]
+
     elif p[1]["data"][0] == "postfix_expression":
 
         if len(p) == 5 and p[3]["data"][0] == "expression":
-            result = cppPostfixExpr(
-                p[1]["data"][1],
-                cppOp("arr_index"),
-                p[3]["data"][1][0].pf_expr,
-                None,
+            curr_scope = symboltab.get_current_scope()
+            tempreg = curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
+            array_size = curr_scope.string_to_var_map[tempreg][0].array_size
+            array_type = curr_scope.string_to_var_map[tempreg][0]._type.typename
+            neg_index = 0
+            if p[3]["code"] != []:
+                element_index = p[3]["code"][0].split(" = ")[1]
+
+                if "." in element_index:
+                    print(
+                        f"Index {element_index} of type float invalid for array at line {driver.lexer.lineno}"
+                    )
+                    errors_found += 1
+                if element_index.isnumeric() and array_size <= int(element_index):
+                    print(
+                        f"Index {element_index} out of bounds for array of size {array_size} at line {driver.lexer.lineno}"
+                    )
+                    errors_found += 1
+                if element_index[1:].isnumeric() and int(element_index) < 0:
+                    if int(element_index) < -int(array_size):
+                        print(
+                            f"Negative index {element_index} out of bounds for array of size {array_size} at line {driver.lexer.lineno}"
+                        )
+                        errors_found += 1
+                    else:
+                        neg_index = 1
+
+            var1 = symboltab.add_temp_var("int")
+            var2 = symboltab.add_temp_var("int")
+            code = [
+                "    "
+                + var1
+                + " = "
+                + p[3]["place"]
+                + " * "
+                + str(dtype_size[array_type])
+            ] + ["    " + var2 + " = " + str(dtype_size[array_type] * array_size)]
+            register_type[var1] = ("temp_reg", "int")
+            register_type[var2] = ("temp_reg", "int")
+            instr = []
+            instr.append(
+                ["multiply_constant", var1, p[3]["place"], str(dtype_size[array_type])]
             )
 
+            if neg_index:
+                instr.append(
+                    [
+                        "constant_assignment",
+                        var2,
+                        str(dtype_size[array_type] * array_size),
+                    ]
+                )
+                code = code + ["    " + var1 + " = " + var2 + " + " + var1]
+                instr.append(["+", var1, var2, var1])
+            else:
+                # code = code + ["    " + var1 + " = " + var2 + " - " + var1]
+                # instr.append(["-", var1, var2, var1])
+                pass
+
+            p[0]["code"] = p[1]["code"] + p[3]["code"] + code
+            p[0]["instr"] = p[1]["instr"] + p[3]["instr"] + instr
+
+            if isinstance(p[3]["data"][1][0], cppPostfixExpr):
+                result = cppPostfixExpr(
+                    p[1]["data"][1],
+                    cppOp("arr_index"),
+                    p[3]["data"][1][0].pf_expr,
+                    None,
+                )
+            # elif isinstance(p[3]["data"][1][0], cppArithExpr):
+            #     result = cppPostfixExpr(
+            #         p[1]["data"][1],
+            #         cppOp("arr_index"),
+            #         p[3]["data"][1][0],
+            #         None,
+            #     )
+            else:
+                print(
+                    f"Cannot handle expression type \"{(p[3]['data'][1][0]).__class__.__name__}\" for array offset at line {driver.lexer.lineno}"
+                )
+                errors_found += 1
+
         elif len(p) == 5 and p[3]["data"][0] == "argument_expression_list":
+
             if p[1]["data"][1].pf_expr.name in symboltab.functions.keys():
                 len_params = symboltab.functions[p[1]["data"][1].pf_expr.name][1]
                 len_args = len(p[3]["data"][1])
                 if len_params == len_args:
+                    sign_flag = 1
+                    for i in range(len_params):
+                        if p[3]["data"][1][
+                            i
+                        ].pf_expr._type.typename != symboltab.functions[
+                            p[1]["data"][1].pf_expr.name
+                        ][
+                            2
+                        ][
+                            i
+                        ].pdec_type.typename and (
+                            p[3]["data"][1][i].pf_expr._type.typename
+                            not in ["char", "int", "float"]
+                            or symboltab.functions[p[1]["data"][1].pf_expr.name][2][
+                                i
+                            ].pdec_type.typename
+                            not in ["char", "int", "float"]
+                        ):
+                            sign_flag = 0
 
-                    result = cppPostfixExpr(
-                        p[1]["data"][1], cppOp("func_call"), None, p[3]["data"][1]
-                    )
-                    p[0]["place"] = symboltab.add_temp_var("int")
-                    func_call = p[1]["data"][1].pf_expr.name + "|"
+                    if sign_flag == 1:
 
-                    stack = str(get_stack_size(p[1]["data"][1].pf_expr.name))
-                    push_param = []
-                    exp_sig = "FunCall " + func_call
-                    i = 0
-                    for var in p[3]["data"][1]:
-                        if isinstance(var, cppId):
-                            push_param.append(
-                                "    Push_param"
-                                + ":"
-                                + symboltab.get_current_scope().var_to_string_map[var]
-                            )
-                            exp_sig += var._type.typename
-                            exp_sig += ","
-                        elif isinstance(var, cppPostfixExpr):
-                            if i < len(p[3]["code"]):
-                                reg = p[3]["code"][i].split(" = ")[0]
-                                i = i + 1
-                                push_param.append("    Push_param" + ":" + reg)
+                        result = cppPostfixExpr(
+                            p[1]["data"][1], cppOp("func_call"), None, p[3]["data"][1]
+                        )
+                        p[0]["place"] = symboltab.add_temp_var("int")
+                        if p[1]["data"][1].pf_expr.name in symboltab.functions.keys():
+                            type = symboltab.functions[p[1]["data"][1].pf_expr.name][0]
+                            register_type[p[0]["place"]] = ("temp_reg", type)
+                        func_call = p[1]["data"][1].pf_expr.name + "|"
+
+                        stack = str(get_stack_size(p[1]["data"][1].pf_expr.name))
+                        push_param, instr = [], "Push_param " + func_call[:-1] + " "
+                        exp_sig = "FunCall " + func_call
+                        i = 0
+                        for var in p[3]["data"][1]:
+                            if isinstance(var.pf_expr, cppId):
+                                push_param.append(
+                                    "    Push_param"
+                                    + " : "
+                                    + symboltab.get_current_scope().var_to_string_map[
+                                        var.pf_expr.name
+                                    ]
+                                )
+                                instr += (
+                                    symboltab.get_current_scope().var_to_string_map[
+                                        var.pf_expr.name
+                                    ]
+                                )
                                 exp_sig += var.pf_expr._type.typename
                                 exp_sig += ","
-                    p[0]["code"] = (
-                        p[1]["code"]
-                        + p[3]["code"]
-                        + push_param
-                        + [
-                            "    "
-                            + p[0]["place"]
-                            + " = "
-                            + (
-                                exp_sig
-                                if exp_sig == "FunCall " + func_call
-                                else exp_sig[:-1]
+                            elif isinstance(var.pf_expr, cppConst):
+                                if i < len(p[3]["code"]):
+                                    reg = p[3]["code"][i].split(" = ")[0]
+                                    i = i + 1
+                                    push_param.append("    Push_param" + " :" + reg[3:])
+                                    instr += reg[3:]
+                                    exp_sig += var.pf_expr._type.typename
+                                    exp_sig += ","
+                        p[0]["code"] = (
+                            p[1]["code"]
+                            + p[3]["code"]
+                            + push_param
+                            + [
+                                "    "
+                                + p[0]["place"]
+                                + " = "
+                                + (
+                                    exp_sig
+                                    if exp_sig == "FunCall " + func_call
+                                    else exp_sig[:-1]
+                                )
+                            ]
+                        )
+                        ###EMPTY INSTRUCTION  [["goto_func_call",func_call[:-1]]]
+                        if symboltab.functions[func_call[:-1]][0] != "void":
+                            p[0]["instr"] = (
+                                p[1]["instr"]
+                                + p[3]["instr"]
+                                + [instr + " returnto " + p[0]["place"]]
+                                # + [["Function_Return", p[0]["place"], func_call[:-1]]]
                             )
+                        else:
+                            p[0]["instr"] = p[1]["instr"] + p[3]["instr"] + [instr]
+                        p[0]["code"] = p[0]["code"] + [
+                            "    " + "Remove_from_stack : " + stack + " space"
                         ]
-                    )
-                    p[0]["code"] = p[0]["code"] + [
-                        "    " + "Remove_from_stack : " + stack + " space"
-                    ]
+                        ###EMPTY INSTRUCTION
                 else:
                     print(
-                        f"Function {p[1]['data'][1].pf_expr.name} expects {len_params} args, but {len_args} were given at line {driver.lexer.lineno}.\n"
+                        f"Function {p[1]['data'][1].pf_expr.name} expects {len_params} args, but {len_args} were given at line {driver.lexer.lineno}"
                     )
-
+                    errors_found += 1
             else:
-                print(
-                    f"Function {p[1]['data'][1].pf_expr.name} called without declaration at line {driver.lexer.lineno}.\n"
+
+                result = cppPostfixExpr(
+                    p[1]["data"][1], cppOp("func_call"), None, p[3]["data"][1]
                 )
+                p[0]["place"] = symboltab.add_temp_var("int")
+                func_call = p[1]["data"][1].pf_expr.name + "|"
+                tmp_func.append(
+                    (
+                        p[1]["data"][1].pf_expr.name,
+                        p[0]["place"],
+                        len(p[3]["data"][1]),
+                        driver.lexer.lineno,
+                    )
+                )
+                # stack = str(get_stack_size(p[1]["data"][1].pf_expr.name))
+                push_param, instr = [], "Push_param " + func_call[:-1] + " "
+                exp_sig = "FunCall " + func_call
+                i = 0
+                for var in p[3]["data"][1]:
+                    if isinstance(var.pf_expr, cppId):
+                        push_param.append(
+                            "    Push_param"
+                            + " : "
+                            + symboltab.get_current_scope().var_to_string_map[
+                                var.pf_expr.name
+                            ]
+                        )
+                        instr += symboltab.get_current_scope().var_to_string_map[
+                            var.pf_expr.name
+                        ]
+                        exp_sig += var.pf_expr._type.typename
+                        exp_sig += ","
+                    elif isinstance(var.pf_expr, cppConst):
+                        if i < len(p[3]["code"]):
+                            reg = p[3]["code"][i].split(" = ")[0]
+                            i = i + 1
+                            push_param.append("    Push_param" + " :" + reg[3:])
+                            instr += reg[3:]
+                            exp_sig += var.pf_expr._type.typename
+                            exp_sig += ","
+                p[0]["code"] = (
+                    p[1]["code"]
+                    + p[3]["code"]
+                    + push_param
+                    + [
+                        "    "
+                        + p[0]["place"]
+                        + " = "
+                        + (
+                            exp_sig
+                            if exp_sig == "FunCall " + func_call
+                            else exp_sig[:-1]
+                        )
+                    ]
+                )
+                # if 1 and symboltab.functions[func_call[:-1]][0] != "void":
+
+                ####Recursion will be done only in non void functions
+                p[0]["instr"] = (
+                    p[1]["instr"]
+                    + p[3]["instr"]
+                    + [instr + " returnto " + p[0]["place"]]
+                )
+                # else:
+                #     p[0]["instr"] = p[1]["instr"] + p[3]["instr"] + [instr]
+                #     p[0]["code"] = p[0]["code"] + ["    " + "Remove_from_stack : " + stack + " space"]
+
+            # else:
+            #     print(
+            #         f"Function {p[1]['data'][1].pf_expr.name} called without declaration at line {driver.lexer.lineno}"
+            #     )
         elif p[2] == "." or p[2] == "->":
+            _struct_type = (
+                symboltab.get_current_scope()
+                .variables[p[1]["data"][1].pf_expr.name]
+                .typename.split("_")[0]
+            )
 
+            _name = p[1]["data"][1].pf_expr.name
+            _var = p[3]
+
+            _name = f"{_struct_type}_{_name}_{_var}"
+            if _name in symboltab.get_current_scope().var_to_string_map.keys():
+                p[0]["place"] = symboltab.get_current_scope().var_to_string_map[_name]
+            else:
+                p[0]["place"] = ""
+
+            p[0]["code"] = []
+            p[0]["instr"] = []
             result = cppPostfixExpr(p[1]["data"][1], cppOp(p[2]), None, cppId(p[3]))
+
+        elif len(p) == 4:
+            result = cppPostfixExpr(p[1]["data"][1], cppOp("func_call"), None, None)
+            func_call = p[1]["data"][1].pf_expr.name + "|"
+            stack = str(get_stack_size(p[1]["data"][1].pf_expr.name))
+            exp_sig = "FunCall " + func_call
+            p[0]["place"] = symboltab.add_temp_var("int")
+            if p[1]["data"][1].pf_expr.name in symboltab.functions.keys():
+                type = symboltab.functions[p[1]["data"][1].pf_expr.name][0]
+                register_type[p[0]["place"]] = ("temp_reg", type)
+            p[0]["code"] = p[1]["code"] + [
+                "    "
+                + p[0]["place"]
+                + " = "
+                + (exp_sig if exp_sig == "FunCall " + func_call else exp_sig[:-1])
+            ]
+            if symboltab.functions[func_call[:-1]][0] != "void":
+                p[0]["instr"] = p[1]["instr"] + [
+                    ["Function_Call", func_call[:-1], "returnto", p[0]["place"]]
+                ]
+            else:
+                p[0]["instr"] = p[1]["instr"] + [["Function_Call", func_call[:-1]]]
+            p[0]["code"] = p[0]["code"] + [
+                "    " + "Remove_from_stack : " + stack + " space"
+            ]
+            ###EMPTY INSTRUCTION
+            # p[0]["instr"] = [["Function_Related"]]
         else:
-
             result = cppPostfixExpr(p[1]["data"][1], cppOp(p[2]), None, None)
+            var = symboltab.add_temp_var("int")
+            register_type[var] = ("temp_reg", "int")
+            if p[2] == "--":
+                p[0]["code"] = (
+                    p[1]["code"]
+                    + ["    " + var + " = " + "1"]
+                    + ["    " + p[1]["place"] + " = " + p[1]["place"] + " - " + var]
+                )
+                p[0]["instr"] = (
+                    p[1]["instr"]
+                    + [["constant_assignment", var, "1"]]
+                    + [["-", p[1]["place"], p[1]["place"], var]]
+                )
 
+            elif p[2] == "++":
+                p[0]["code"] = (
+                    p[1]["code"]
+                    + ["    " + var + " = " + "1"]
+                    + ["    " + p[1]["place"] + " = " + p[1]["place"] + " + " + var]
+                )
+                p[0]["instr"] = (
+                    p[1]["instr"]
+                    + [["constant_assignment", var, "1"]]
+                    + [["+", p[1]["place"], p[1]["place"], var]]
+                )
     p[0]["data"] = ("postfix_expression", result)
 
 
@@ -304,19 +618,20 @@ def p_argument_expression_list(p):
         result = [p[1]["data"][1]]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
         if "place" in p[1].keys():
             p[0]["place"] = p[1]["place"]
     else:
         result = p[1]["data"][1] + [p[3]["data"][1]]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"].copy() + p[3]["code"].copy()
+            p[0]["instr"] = p[1]["instr"].copy() + p[3]["instr"].copy()
         if "place" in p[1].keys():
             p[0]["place"] = p[1]["place"] + p[3]["place"]
 
     p[0]["data"] = ("argument_expression_list", result)
 
 
-# TODO: star for multiply vs pointer
 def p_unary_expression(p):
     """
     unary_expression : postfix_expression
@@ -328,34 +643,107 @@ def p_unary_expression(p):
     # | SIZEOF unary_expression
     p[0] = {}
 
-    if p[1]["data"][0] == "postfix_expression":
+    if len(p) == 2:
 
         result = p[1]["data"][1]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
         if "place" in p[1].keys():
             p[0]["place"] = p[1]["place"]
     elif p[2]["data"][0] == "unary_expression":
         result = cppUnExpr(p[2]["data"][1], cppOp(p[1]))
         if "code" in p[2].keys() and "place" in p[2].keys():
-            p[0]["code"] = p[2]["code"] + [p[2]["place"] + " " + p[1]]
+            var = symboltab.add_temp_var("int")
+            register_type[var] = ("temp_reg", "int")
+            if p[1] == "--":
+                p[0]["code"] = (
+                    p[2]["code"]
+                    + ["    " + var + " = " + "1"]
+                    + ["    " + p[2]["place"] + " = " + p[2]["place"] + " - " + var]
+                )
+                p[0]["instr"] = (
+                    p[2]["instr"]
+                    + [["constant_assignment", var, "1"]]
+                    + [["-", p[2]["place"], p[2]["place"], var]]
+                )
+            elif p[1] == "++":
+                p[0]["code"] = (
+                    p[2]["code"]
+                    + ["    " + var + " = " + "1"]
+                    + ["    " + p[2]["place"] + " = " + p[2]["place"] + " + " + var]
+                )
+                p[0]["instr"] = (
+                    p[2]["instr"]
+                    + [["constant_assignment", var, "1"]]
+                    + [["+", p[2]["place"], p[2]["place"], var]]
+                )
     elif p[2]["data"][0] == "cast_expression":
-        # print(p[2]["data"][1].expr_type)
         if p[1]["data"][1].op == "-" or p[1]["data"][1].op == "+":
             pre = -1 if p[1]["data"][1].op == "-" else 1
-            temp = symboltab.add_temp_var(p[2]["data"][1].expr_type)
+            # temp = symboltab.add_temp_var(p[2]["data"][1].expr_type)
             if "place" not in p[0].keys():
                 p[0]["place"] = symboltab.add_temp_var("int")
+                register_type[p[0]["place"]] = (
+                    "temp_reg",
+                    p[2]["data"][1].pf_expr._type.typename,
+                )
             p[0]["code"] = [
                 "    " + p[0]["place"] + " = " + str(pre * p[2]["data"][1].pf_expr.val)
             ]
-            result = cppPostfixExpr(
-                cppConst(
-                    pre * p[2]["data"][1].pf_expr.val,
-                    cppType(p[2]["data"][1].expr_type),
-                ),
-                None,
-            )
+            p[0]["instr"] = [
+                [
+                    "constant_assignment",
+                    p[0]["place"],
+                    str(pre * p[2]["data"][1].pf_expr.val),
+                ]
+            ]
+
+            if isinstance(p[2]["data"][1].expr_type, str):
+                result = cppPostfixExpr(
+                    cppConst(
+                        pre * p[2]["data"][1].pf_expr.val,
+                        cppType(p[2]["data"][1].expr_type),
+                    ),
+                    None,
+                )
+            elif isinstance(p[2]["data"][1].expr_type, cppType):
+                result = cppPostfixExpr(
+                    cppConst(
+                        pre * p[2]["data"][1].pf_expr.val,
+                        cppType(p[2]["data"][1].expr_type.typename),
+                    ),
+                    None,
+                )
+
+        elif p[1]["data"][1].op == "&":
+
+            if "place" not in p[0].keys():
+                p[0]["place"] = symboltab.add_temp_var("int")
+                register_type[p[0]["place"]] = (
+                    "temp_reg",
+                    p[2]["data"][1].pf_expr._type.typename,
+                )
+                p[0]["code"] = ["    " + p[0]["place"] + " = & " + p[2]["place"]]
+                p[0]["instr"] = [["address_assignment", p[0]["place"], p[2]["place"]]]
+                result = cppUnExpr(p[2]["data"][1], p[1]["data"][1])
+        elif p[1]["data"][1].op == "*":
+            if "place" not in p[0].keys():
+                ptr_reg = symboltab.get_current_scope().var_to_string_map[
+                    p[2]["data"][1].pf_expr.name
+                ]
+                ptr_reg_type = p[2]["data"][1].pf_expr._type.typename.split("_")[1]
+                p[0]["place"] = symboltab.add_temp_var(ptr_reg_type)
+                register_type[p[0]["place"]] = ("temp_reg", ptr_reg_type)
+                p[0]["code"] = ["    *" + p[0]["place"]]
+                p[0]["instr"] = p[2]["instr"] + [
+                    ["pointer_deref", p[0]["place"], ptr_reg]
+                ]
+                p[0]["code"] = p[2]["code"] + [
+                    ["pointer_deref" + " " + p[0]["place"] + " " + ptr_reg]
+                ]
+
+            result = cppUnExpr(p[2]["data"][1], p[1]["data"][1])
         else:
             result = cppUnExpr(p[2]["data"][1], p[1]["data"][1])
     # elif p[2][1] == "unary_expression":
@@ -401,6 +789,7 @@ def p_cast_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
 
     p[0]["data"] = ("cast_expression", result)
 
@@ -417,7 +806,13 @@ def p_multiplicative_expression(p):
     if p[1]["data"][0] == "multiplicative_expression":
         result = cppArithExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
         p[0]["place"] = symboltab.add_temp_var("int")
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -439,6 +834,7 @@ def p_multiplicative_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     p[0]["data"] = ("multiplicative_expression", result)
 
 
@@ -456,24 +852,35 @@ def p_additive_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppArithExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
         p[0]["place"] = symboltab.add_temp_var("int")
-        if "place" in p[1].keys() and "place" in p[3].keys():
-            p[0]["code"] = (
-                p[1]["code"]
-                + p[3]["code"]
-                + [
-                    "    "
-                    + p[0]["place"]
-                    + " = "
-                    + p[1]["place"]
-                    + " "
-                    + p[2]
-                    + " "
-                    + p[3]["place"]
-                ]
-            )
+        if "place" not in p[1].keys():
+            p[1]["place"] = symboltab.add_temp_var("int")
+        if "place" not in p[3].keys():
+            p[3]["place"] = symboltab.add_temp_var("int")
+
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
+        p[0]["code"] = (
+            p[1]["code"]
+            + p[3]["code"]
+            + [
+                "    "
+                + p[0]["place"]
+                + " = "
+                + p[1]["place"]
+                + " "
+                + p[2]
+                + " "
+                + p[3]["place"]
+            ]
+        )
+        p[0]["instr"] = (
+            p[1]["instr"]
+            + p[3]["instr"]
+            + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+        )
 
     p[0]["data"] = ("additive_expression", result)
 
@@ -492,10 +899,16 @@ def p_shift_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppShiftExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
         p[0]["place"] = symboltab.add_temp_var("int")
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -509,7 +922,7 @@ def p_shift_expression(p):
                     + p[3]["place"]
                 ]
             )
-
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
     p[0]["data"] = ("shift_expression", result)
 
 
@@ -529,10 +942,16 @@ def p_relational_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppRelationExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
         p[0]["place"] = symboltab.add_temp_var("int")
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -547,7 +966,7 @@ def p_relational_expression(p):
                     + p[3]["place"]
                 ]
             )
-
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
     p[0]["data"] = ("relational_expression", result)
 
 
@@ -565,10 +984,16 @@ def p_equality_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppRelationExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
         p[0]["place"] = symboltab.add_temp_var("int")
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -583,7 +1008,7 @@ def p_equality_expression(p):
                     + p[3]["place"]
                 ]
             )
-
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
     p[0]["data"] = ("equality_expression", result)
 
 
@@ -600,10 +1025,16 @@ def p_and_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
         p[0]["place"] = symboltab.add_temp_var("int")
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -618,7 +1049,7 @@ def p_and_expression(p):
                     + p[3]["place"]
                 ]
             )
-
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
     p[0]["data"] = ("and_expression", result)
 
 
@@ -635,10 +1066,18 @@ def p_xor_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+
         p[0]["place"] = symboltab.add_temp_var("int")
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
+
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -653,7 +1092,7 @@ def p_xor_expression(p):
                     + p[3]["place"]
                 ]
             )
-
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
     p[0]["data"] = ("xor_expression", result)
 
 
@@ -670,10 +1109,17 @@ def p_or_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
+
         p[0]["place"] = symboltab.add_temp_var("int")
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -688,7 +1134,7 @@ def p_or_expression(p):
                     + p[3]["place"]
                 ]
             )
-
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
     p[0]["data"] = ("or_expression", result)
 
 
@@ -705,10 +1151,16 @@ def p_logical_and_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
         p[0]["place"] = symboltab.add_temp_var("int")
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -723,7 +1175,7 @@ def p_logical_and_expression(p):
                     + p[3]["place"]
                 ]
             )
-
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
     p[0]["data"] = ("logical_and_expression", result)
 
 
@@ -740,10 +1192,16 @@ def p_logical_or_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppLogicExpr(p[1]["data"][1], cppOp(p[2]), p[3]["data"][1])
         p[0]["place"] = symboltab.add_temp_var("int")
         if "place" in p[1].keys() and "place" in p[3].keys():
+            p[0]["instr"] = (
+                p[1]["instr"]
+                + p[3]["instr"]
+                + [[p[2], p[0]["place"], p[1]["place"], p[3]["place"]]]
+            )
             p[0]["code"] = (
                 p[1]["code"]
                 + p[3]["code"]
@@ -758,6 +1216,7 @@ def p_logical_or_expression(p):
                     + p[3]["place"]
                 ]
             )
+        register_type[p[0]["place"]] = symboltab.find_type(p[1]["place"], p[3]["place"])
     p[0]["data"] = ("logical_or_expression", result)
 
 
@@ -774,6 +1233,7 @@ def p_conditional_expression(p):
             p[0]["place"] = p[1]["place"]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = cppCondExpr(p[1]["data"][1], p[3]["data"][1], p[5]["data"][1])
 
@@ -786,7 +1246,6 @@ def p_assignment_expression(p):
         | unary_expression assignment_operator assignment_expression
 
     """
-
     p[0] = {}
     curr_scope = symboltab.get_current_scope()
     if "place" in p[1].keys():
@@ -795,43 +1254,231 @@ def p_assignment_expression(p):
         result = p[1]["data"][1]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"].copy()
+            p[0]["instr"] = p[1]["instr"].copy()
 
     else:
         result = cppAssignExpr(
             cppUnExpr(p[1]["data"][1], None), p[2]["data"][1], p[3]["data"][1]
         )
-        code = []
-        rhs = p[3]["place"]
+        code, instr = [], []
 
-        # print(p[1]["data"][1].pf_expr.name==None)
-        if p[2]["data"][1].op == "=":
-            code = [
-                "    "
-                + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
-                + " = "
-                + str(rhs)
-            ]
+        if "place" in p[3].keys():
+            rhs = p[3]["place"]
+            if p[2]["data"][1].op == "=":
+
+                # Pointer deref
+                if (
+                    isinstance(p[1]["data"][1], cppUnExpr)
+                    and p[1]["data"][1].un_op.op == "*"
+                ):
+                    code = ["    " + "*" + p[1]["place"] + " = " + str(rhs)]
+                    instr.append(
+                        [
+                            "assignment_expression",
+                            p[1]["place"],
+                            str(rhs),
+                        ]
+                    )
+                    code = ["    " + "*" + p[1]["place"] + " = " + str(rhs)]
+                    instr.append(
+                        [
+                            "var_allocation_at_ptr",
+                            curr_scope.var_to_string_map[
+                                p[1]["data"][1].un_expr.pf_expr.name
+                            ],
+                            p[1]["place"],
+                        ]
+                    )
+                elif (
+                    isinstance(p[3]["data"][1], cppUnExpr)
+                    and p[3]["data"][1].un_op.op == "*"
+                ):
+                    code = ["    " + "*" + p[3]["place"] + " = " + str(rhs)]
+                    instr.append(
+                        [
+                            "assignment_expression",
+                            p[1]["place"],
+                            str(rhs),
+                        ]
+                    )
+                # Array case
+                elif isinstance(p[1]["data"][1].pf_expr, cppPostfixExpr):
+                    if isinstance(p[1]["data"][1].pf_offset, cppId):
+                        if (
+                            p[1]["data"][1].pf_expr.pf_expr.name
+                            in curr_scope.var_to_string_map.keys()
+                        ):
+                            code = [
+                                "    "
+                                + curr_scope.var_to_string_map[
+                                    p[1]["data"][1].pf_expr.pf_expr.name
+                                ]
+                                + " "
+                                + p[1]["instr"][-1][1]
+                                + " = "
+                                + str(rhs)
+                            ]
+                            instr.append(
+                                [
+                                    "assign_to_array",
+                                    curr_scope.var_to_string_map[
+                                        p[1]["data"][1].pf_expr.pf_expr.name
+                                    ],
+                                    p[1]["instr"][-1][1],
+                                    str(rhs),
+                                ]
+                            )
+
+                    elif (
+                        isinstance(p[1]["data"][1], cppPostfixExpr)
+                        and p[1]["data"][1].pf_op.op == "."
+                    ):
+                        _struct_type = (
+                            symboltab.get_current_scope()
+                            .variables[
+                                p[1]["data"][1].pf_expr.pf_expr.name.split("_")[0]
+                            ]
+                            .typename.split("_")[0]
+                        )
+
+                        _name = p[1]["data"][1].pf_expr.pf_expr.name
+                        _var = p[1]["data"][1].pf_id.name
+
+                        _name = f"{_struct_type}_{_name}_{_var}"
+                        code = ["    " + p[1]["place"] + " " + " = " + str(rhs)]
+                        instr.append(
+                            [
+                                "assignment_expression",
+                                p[1]["place"],
+                                str(rhs),
+                            ]
+                        )
+                    else:
+                        if (
+                            p[1]["data"][1].pf_expr.pf_expr.name
+                            in curr_scope.var_to_string_map.keys()
+                        ):
+                            code = [
+                                "    "
+                                + curr_scope.var_to_string_map[
+                                    p[1]["data"][1].pf_expr.pf_expr.name
+                                ]
+                                + " "
+                                + p[1]["instr"][-1][1]
+                                + " = "
+                                + str(rhs)
+                            ]
+
+                            instr.append(
+                                [
+                                    "assign_to_array",
+                                    curr_scope.var_to_string_map[
+                                        p[1]["data"][1].pf_expr.pf_expr.name
+                                    ],
+                                    p[1]["instr"][-1][1],
+                                    str(rhs),
+                                ]
+                            )
+                elif (
+                    isinstance(p[1]["data"][1], cppPostfixExpr)
+                    and isinstance(p[3]["data"][1], cppUnExpr)
+                    and p[3]["data"][1].un_op.op == "&"
+                ):
+                    code = [
+                        "    "
+                        + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
+                        + " = "
+                        + str(rhs)
+                    ]
+
+                    instr.append(
+                        [
+                            "assignment_expression",
+                            curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name],
+                            str(rhs),
+                        ]
+                    )
+                else:
+                    if (
+                        p[1]["data"][1].pf_expr.name
+                        in curr_scope.var_to_string_map.keys()
+                    ):
+                        code = [
+                            "    "
+                            + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
+                            + " = "
+                            + str(rhs)
+                        ]
+                        instr.append(
+                            [
+                                "assignment_expression",
+                                curr_scope.var_to_string_map[
+                                    p[1]["data"][1].pf_expr.name
+                                ],
+                                str(rhs),
+                            ]
+                        )
+                # Add array case
+            else:
+                assigner = symboltab.add_temp_var("int")
+                code = [
+                    "    "
+                    + assigner
+                    + " = "
+                    + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
+                    + " "
+                    + p[2]["data"][1].op[0]
+                    + " "
+                    + str(rhs)
+                ]
+                register_type[assigner] = symboltab.find_type(
+                    curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name], str(rhs)
+                )
+                instr.append(
+                    [
+                        p[2]["data"][1].op[0],
+                        assigner,
+                        curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name],
+                        str(rhs),
+                    ]
+                )
+                code = code + [
+                    "    "
+                    + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
+                    + " = "
+                    + assigner
+                ]
+                instr.append(
+                    [
+                        "assignment_expression",
+                        curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name],
+                        assigner,
+                    ]
+                )
+
         else:
-            assigner = symboltab.add_temp_var("int")
-            code = [
-                "    "
-                + assigner
-                + " = "
-                + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
-                + " "
-                + p[2]["data"][1].op[0]
-                + " "
-                + +rhs
-            ]
-            code = code + [
-                "    "
-                + curr_scope.var_to_string_map[p[1]["data"][1].pf_expr.name]
-                + " = "
-                + assigner
-            ]
+            if p[3]["data"][1] and p[3]["data"][1].pf_expr:
+                var = curr_scope.var_to_string_map[p[3]["data"][1].pf_expr.pf_expr.name]
+                if "place" in p[1].keys():
+                    code = [
+                        "    "
+                        + p[1]["place"]
+                        + " = "
+                        + p[3]["instr"][-1][1]
+                        + " "
+                        + var
+                    ]
+                    instr.append(
+                        ["assign_from_array", p[1]["place"], p[3]["instr"][-1][1], var]
+                    )
+
+                # register_type[var] = ("temp_reg", "int")
 
         if "code" in p[3].keys() and "code" in p[1].keys():
+
             p[0]["code"] = p[3]["code"].copy() + p[1]["code"].copy() + code
+            p[0]["instr"] = p[3]["instr"].copy() + p[1]["instr"].copy() + instr
+
     p[0]["data"] = ("assignment_expression", result)
 
 
@@ -867,10 +1514,12 @@ def p_expression(p):
         result = [p[1]["data"][1]]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
     else:
         result = p[1]["data"][1] + [p[3]["data"][1]]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"] + p[2]["code"]
+            p[0]["instr"] = p[1]["instr"] + p[2]["instr"]
 
     p[0]["data"] = ("expression", result)
 
@@ -888,10 +1537,6 @@ def p_declaration(p):
     elif len(p) == 3:
         result = cppDeclaration(p[1]["data"][1], None)
     else:
-        # print(p[2]["data"][1][0].declarator.ddecl.name.name)
-        # if p[2]["data"][1][0].initializer is not None:
-        #     print(p[2]["data"][1][0].initializer.init_expr.pf_expr.val)
-
         result = cppDeclaration(p[1]["data"][1], p[2]["data"][1])
     p[0]["data"] = ("declaration", result)
 
@@ -944,9 +1589,10 @@ def p_type_specifier(p):
     p[0] = {}
 
     if p[1] == "class":
-        result = cppType(f"class_{p[1]}")
+        result = cppType(f"{p[1]}_class")
     elif isinstance(p[1], dict) and p[1]["data"][0] == "struct_specifier":
-        result = cppType(f"struct_{p[1]['data'][1].s_tag.name}")
+        result = cppType(f"{p[1]['data'][1].s_tag.name}_struct")
+
     else:
         result = cppType(p[1])
 
@@ -1016,15 +1662,15 @@ def p_direct_declarator(p):
                 p[2]["data"][1].name, None, p[2]["data"][1], None, None, 2
             )
         elif p[2] == "[":
+
             result = cppDirectDeclarator(None, p[1]["data"][1], None, None, None, 4)
         elif p[2] == "(":
             result = cppDirectDeclarator(None, p[1]["data"][1], None, None, None, 7)
 
     elif len(p) == 5:
         if p[3]["data"][0] == "conditional_expression":
-
             result = cppDirectDeclarator(
-                None, p[1]["data"][1], None, None, p[3]["data"][1], 3
+                p[1]["data"][1].name, p[1]["data"][1], None, None, p[3]["data"][1], 3
             )
         if p[3]["data"][0] == "parameter_list":
             result = cppDirectDeclarator(
@@ -1046,10 +1692,8 @@ def p_declarator(p):
     p[0] = {}
 
     if p[1]["data"][0] == "pointer":
-        print(p[2]["data"][1].name.name)
-        result = cppDeclarator(p[2]["data"][1].name, None, None, True)
+        result = cppDeclarator(p[2]["data"][1].name, p[2]["data"][1], None, True)
     else:
-        # result = cppDeclarator(p[1][1].name, None)
         result = cppDeclarator(p[1]["data"][1].name, p[1]["data"][1], None)
 
     p[0]["data"] = ("declarator", result)
@@ -1077,8 +1721,15 @@ def p_parameter_declaration(p):
                           | type_specifier
     """
     p[0] = {}
-
+    global curr_param
     if len(p) > 2:
+        symboltab.check_and_add_variable(p[2]["data"][1].name, p[1]["data"][1])
+        curr_param.append(p[2]["data"][1].name.name)
+        curr_scope = symboltab.get_current_scope()
+        register_type[curr_scope.var_to_string_map[p[2]["data"][1].name.name]] = (
+            "reg",
+            p[1]["data"][1].typename,
+        )
         result = cppParamDeclaration(p[1]["data"][1], p[2]["data"][1])
     else:
         result = cppParamDeclaration(p[1]["data"][1], None)
@@ -1099,14 +1750,21 @@ def p_struct_specifier(p):
 
     if len(p) == 6:
         result = cppStruct(cppId(p[2]), cppId(p[2]), p[4]["data"][1])
+        symboltab.cmpd_ctr += 1
     elif len(p) == 5 and p[2] == "{":
         result = cppStruct(None, None, p[3]["data"][1])
-    elif (len(p) == 5 and p[3] == "{") or len(p) == 3:
+        symboltab.cmpd_ctr += 1
+    elif len(p) == 5 and p[3] == "{":
         result = cppStruct(cppId(p[2]), cppId(p[2]), None)
+        symboltab.cmpd_ctr += 1
+
     elif len(p) == 4:
         result = cppStruct(None, None, None)
+        symboltab.cmpd_ctr += 1
+
     elif len(p) == 3:
-        result = cppStruct(None, None, None)
+        result = cppStruct(cppId(p[2]), cppId(p[2]), None, 1)
+        # result = cppStruct(None, cppId(p[2]), None, 1)
 
     p[0]["data"] = ("struct_specifier", result)
 
@@ -1170,7 +1828,6 @@ def p_struct_declaration_list(p):
     p[0]["data"] = ("struct_declaration_list", result)
 
 
-# TODO: what is base clause doing in the end
 def p_class_head(p):
     """
     class_head : CLASS base_clause
@@ -1256,7 +1913,6 @@ def p_member_declarator_list(p):
     p[0]["data"] = ("member_declarator_list", result)
 
 
-# TODO
 def p_member_declaration(p):
     """
     member_declaration : type_specifier member_declarator_list SEMICOLON
@@ -1267,7 +1923,6 @@ def p_member_declaration(p):
                        | class_specifier
     """
     p[0] = {}
-
     if len(p) == 2:
         if p[1] == ";":
             result = cppMemberDeclaration(None, None, None)
@@ -1277,6 +1932,7 @@ def p_member_declaration(p):
             )
             if "code" in p[2].keys():
                 p[0]["code"] = [p[1]["code"].copy()]
+                p[0]["instr"] = [p[1]["instr"].copy()]
         elif p[1]["data"][0] == "class_specifier":
             result = cppMemberDeclaration(None, None, None)
 
@@ -1317,11 +1973,13 @@ def p_member_access_list(p):
     if len(p) == 3:
         result = [p[1]["data"][1]] + p[2]["data"][1]
         if "code" in p[1].keys():
-            p[0]["code"] = [p[1]["code"].copy()] + p[2]["code"]
+            p[0]["code"] = p[1]["code"].copy() + p[2]["code"]
+            p[0]["instr"] = p[1]["instr"].copy() + p[2]["instr"]
     else:
         result = [p[1]["data"][1]]
         if "code" in p[1].keys():
-            p[0]["code"] = [p[1]["code"].copy()]
+            p[0]["code"] = p[1]["code"].copy()
+            p[0]["instr"] = p[1]["instr"].copy()
 
     p[0]["data"] = ("member_access_list", result)
 
@@ -1509,6 +2167,7 @@ def p_statement(p):
     p[0]["data"] = ("statement", p[1]["data"][1])
     if "code" in p[1].keys():
         p[0]["code"] = p[1]["code"]
+        p[0]["instr"] = p[1]["instr"]
         # p[0]["place"] = p[1]["place"]
 
 
@@ -1532,42 +2191,142 @@ def p_compound_statement(p):
     """
     p[0] = {}
 
-    symboltab.cmpd_ctr += 1
+    # symboltab.cmpd_ctr += 1
     if p[1] == "{" and p[2] == "}":
         result = cppCompoundStmt(None, None)
     elif p[2]["data"][0] == "declaration_list":
-        # print(p[2]["data"][1][0].initdecl_list[0].declarator.name.name)
-        # print(p[2]["data"][1][0].initdecl_list[0].initializer.init_expr.pf_expr.val)
         if p[3] == "}":
             result = cppCompoundStmt(p[2]["data"][1], None)
 
         elif p[3]["data"][0] == "statement_list":
+
             result = cppCompoundStmt(p[2]["data"][1], p[3]["data"][1])
         curr_scope = symboltab.get_current_scope()
-        lis_decl = []
+        lis_decl, instr = [], []
         for i in range(len(p[2]["data"][1])):
             if p[2]["data"][1][i] is not None:
                 for j in range(len(p[2]["data"][1][i].initdecl_list)):
-                    lis_decl.append(
-                        "    "
-                        + curr_scope.var_to_string_map[
-                            p[2]["data"][1][i].initdecl_list[j].declarator.name.name
-                        ]
-                        + " = "
-                        + str(
+                    if p[2]["data"][1][i].initdecl_list[j].initializer:
+                        if isinstance(
                             p[2]["data"][1][i]
                             .initdecl_list[j]
-                            .initializer.init_expr.pf_expr.val
-                            if p[2]["data"][1][i].initdecl_list[j].initializer
-                            else "0"
-                        )
-                    )
+                            .initializer.init_expr.pf_expr,
+                            cppConst,
+                        ):
+                            lis_decl.append(
+                                "    "
+                                + curr_scope.var_to_string_map[
+                                    p[2]["data"][1][i]
+                                    .initdecl_list[j]
+                                    .declarator.name.name
+                                ]
+                                + " = "
+                                + str(
+                                    p[2]["data"][1][i]
+                                    .initdecl_list[j]
+                                    .initializer.init_expr.pf_expr.val
+                                    if p[2]["data"][1][i].initdecl_list[j].initializer
+                                    else "0"
+                                )
+                            )
+                            if p[2]["data"][1][i].initdecl_list[j].initializer:
+                                instr.append(
+                                    [
+                                        "constant_assignment",
+                                        curr_scope.var_to_string_map[
+                                            p[2]["data"][1][i]
+                                            .initdecl_list[j]
+                                            .declarator.name.name
+                                        ],
+                                        str(
+                                            p[2]["data"][1][i]
+                                            .initdecl_list[j]
+                                            .initializer.init_expr.pf_expr.val
+                                        ),
+                                    ]
+                                )
+                            else:
+                                instr.append(
+                                    [
+                                        "constant_assignment",
+                                        curr_scope.var_to_string_map[
+                                            p[2]["data"][1][i]
+                                            .initdecl_list[j]
+                                            .declarator.name.name
+                                        ],
+                                        "0",
+                                    ]
+                                )
+                        else:
+                            lis_decl.append(
+                                "    "
+                                + curr_scope.var_to_string_map[
+                                    p[2]["data"][1][i]
+                                    .initdecl_list[j]
+                                    .declarator.name.name
+                                ]
+                                + " = "
+                                + curr_scope.var_to_string_map[
+                                    p[2]["data"][1][i]
+                                    .initdecl_list[j]
+                                    .initializer.init_expr.pf_expr.name
+                                ]
+                            )
+                            instr.append(
+                                [
+                                    "assignment_expression",
+                                    curr_scope.var_to_string_map[
+                                        p[2]["data"][1][i]
+                                        .initdecl_list[j]
+                                        .declarator.name.name
+                                    ],
+                                    curr_scope.var_to_string_map[
+                                        p[2]["data"][1][i]
+                                        .initdecl_list[j]
+                                        .initializer.init_expr.pf_expr.name
+                                    ],
+                                ]
+                            )
+                    else:
+                        if (
+                            p[2]["data"][1][i].initdecl_list[j].declarator.name.name
+                            in curr_scope.var_to_string_map.keys()
+                            and not "_"
+                            in p[2]["data"][1][i]
+                            .initdecl_list[j]
+                            .declarator.name._type.typename
+                        ):
+                            lis_decl.append(
+                                "    "
+                                + curr_scope.var_to_string_map[
+                                    p[2]["data"][1][i]
+                                    .initdecl_list[j]
+                                    .declarator.name.name
+                                ]
+                                + " = "
+                                + "0"
+                            )
+                            instr.append(
+                                [
+                                    "constant_assignment",
+                                    curr_scope.var_to_string_map[
+                                        p[2]["data"][1][i]
+                                        .initdecl_list[j]
+                                        .declarator.name.name
+                                    ],
+                                    "0",
+                                ]
+                            )
+
         p[0]["code"] = lis_decl
+        p[0]["instr"] = instr
         if p[3] != "}" and "code" in p[3].keys():
             p[0]["code"] = p[0]["code"] + p[3]["code"]
+            p[0]["instr"] = p[0]["instr"] + p[3]["instr"]
     elif p[2]["data"][0] == "statement_list":
         if "code" in p[2].keys():
             p[0]["code"] = p[2]["code"]
+            p[0]["instr"] = p[2]["instr"]
         result = cppCompoundStmt(None, p[2]["data"][1])
 
     # symboltab.remove_scope_from_stack()
@@ -1585,12 +2344,14 @@ def p_declaration_list(p):
         result = p[1]["data"][1] + [p[2]["data"][1]]
         if "code" in p[1].keys() and "code" in p[2].keys():
             p[0]["code"] = p[1]["code"] + p[2]["code"]
+            p[0]["instr"] = p[1]["instr"] + p[2]["instr"]
 
     else:
 
         result = [p[1]["data"][1]]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
 
     p[0]["data"] = ("declaration_list", result)
 
@@ -1606,12 +2367,14 @@ def p_statement_list(p):
         result = p[1]["data"][1] + [p[2]["data"][1]]
         if "code" in p[1].keys() and "code" in p[2].keys():
             p[0]["code"] = p[1]["code"] + p[2]["code"]
+            p[0]["instr"] = p[1]["instr"] + p[2]["instr"]
         if "place" in p[2].keys():
             p[0]["place"] = p[2]["place"]
     else:
         result = [p[1]["data"][1]]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"]
+            p[0]["instr"] = p[1]["instr"]
         if "place" in p[1].keys():
             p[0]["place"] = p[1]["place"]
 
@@ -1626,7 +2389,10 @@ def p_expression_statement(p):
     p[0] = {}
     if "place" in p[1].keys():
         p[0]["place"] = p[1]["place"]
+    if "code" in p[1].keys():
         p[0]["code"] = p[1]["code"].copy()
+        p[0]["instr"] = p[1]["instr"].copy()
+
     if p[1] != ";":
         p[0]["data"] = ("expression_statement", p[1]["data"][1])
     else:
@@ -1637,10 +2403,11 @@ def p_selection_statement(p):
     """
     selection_statement : IF LEFT_PARENTHESIS expression RIGHT_PARENTHESIS statement %prec IF
                         | IF LEFT_PARENTHESIS expression RIGHT_PARENTHESIS statement ELSE statement
+                        | ASSERT LEFT_PARENTHESIS expression RIGHT_PARENTHESIS SEMICOLON
     """
     p[0] = {}
 
-    if len(p) == 6:
+    if len(p) == 6 and p[1] != "assert":
         result = cppSelectStmt(p[3]["data"][1], p[5]["data"][1], None)
         p[0]["after"] = symboltab.add_temp_var()
         p[0]["code"] = (
@@ -1649,6 +2416,33 @@ def p_selection_statement(p):
             + p[5]["code"]
             + [p[0]["after"] + " : "]
         )
+
+        p[0]["instr"] = (
+            p[3]["instr"]
+            + [["ifz", p[3]["place"], p[0]["after"]]]
+            + p[5]["instr"]
+            + [["Label", p[0]["after"]]]
+        )
+
+    # Assert Statement
+    elif p[1] == "assert":
+        result = cppSelectStmt(p[3]["data"][1], None, None)
+        p[0]["after"] = symboltab.add_temp_var()
+        p[0]["instr"] = (
+            p[3]["instr"]
+            + [["!", p[3]["place"]]]
+            + [["ifz", p[3]["place"], p[0]["after"]]]
+            + [["exit", str(driver.lexer.lineno)]]
+            + [["Label", p[0]["after"]]]
+        )
+        p[0]["code"] = (
+            p[3]["code"]
+            + ["    not " + p[3]["place"]]
+            + ["    ifz " + p[3]["place"] + " goto->" + p[0]["after"]]
+            + ["    exit"]
+            + [p[0]["after"] + " : "]
+        )
+
     else:
         result = cppSelectStmt(p[3]["data"][1], p[5]["data"][1], p[7]["data"][1])
         p[0]["before"] = symboltab.add_temp_var()
@@ -1659,6 +2453,11 @@ def p_selection_statement(p):
             + p[5]["code"]
             + ["goto->" + p[0]["after"]]
         )
+        instr = (
+            [["ifz", p[3]["place"], p[0]["else"]]]
+            + p[5]["instr"]
+            + [["ifgoto", p[0]["after"]]]
+        )
         p[0]["code"] = (
             p[3]["code"]
             + [p[0]["before"] + " : "]
@@ -1666,6 +2465,14 @@ def p_selection_statement(p):
             + [p[0]["else"] + " : "]
             + p[7]["code"]
             + [p[0]["after"] + " : "]
+        )
+        p[0]["instr"] = (
+            p[3]["instr"]
+            + [["Label", p[0]["before"]]]
+            + instr
+            + [["Label", p[0]["else"]]]
+            + p[7]["instr"]
+            + [["Label", p[0]["after"]]]
         )
     p[0]["data"] = ("selection_statement", result)
 
@@ -1693,14 +2500,33 @@ def p_iteration_statement(p):
             + p[5]["code"]
             + ["goto->" + p[0]["begin"]]
         )
+
+        instr = (
+            p[3]["instr"]
+            + [["ifz", p[3]["place"], p[0]["after"]]]
+            + p[5]["instr"]
+            + [["ifgoto", p[0]["begin"]]]
+        )
         string = [
             "    goto->" + p[0]["after"] if i == "    break" else i for i in string
         ]
+        string = [
+            "    goto->" + p[0]["begin"] if i == "    continue" else i for i in string
+        ]
+        instr1 = []
+        for i in instr:
+            if i[0] == "break":
+                instr1.append(["ifgoto", p[0]["after"]])
+            elif i[0] == "continue":
+                instr1.append(["ifgoto", p[0]["begin"]])
+            else:
+                instr1.append(i)
         p[0]["code"] = [
             p[0]["begin"] + " : "
         ] + string  # + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
         # p[0]["code"] = p[0]["code"] + [p[0]["continue"] + " : "] + string + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
         p[0]["code"] = p[0]["code"] + [p[0]["after"] + " : "]
+        p[0]["instr"] = [["Label", p[0]["begin"]]] + instr1 + [["Label", p[0]["after"]]]
     elif p[1] == "for":
         if p[3]["data"][0] == "expression_statement":
             if p[5] == ")":
@@ -1718,11 +2544,43 @@ def p_iteration_statement(p):
                     + p[5]["code"]
                     + ["goto->" + p[0]["begin"]]
                 )
+
+                instr = (
+                    p[4]["instr"]
+                    + [["ifz", p[4]["place"], p[0]["after"]]]
+                    + p[7]["instr"]
+                    + p[5]["instr"]
+                    + [["ifgoto", p[0]["begin"]]]
+                )
+
+                string = [
+                    "    goto->" + p[0]["after"] if i == "    break" else i
+                    for i in string
+                ]
+                string = [
+                    "    goto->" + p[0]["begin"] if i == "    continue" else i
+                    for i in string
+                ]
+                instr1 = []
+                for i in instr:
+                    if i[0] == "break":
+                        instr1.append(["ifgoto", p[0]["after"]])
+                    elif i[0] == "continue":
+                        instr1.append(["ifgoto", p[0]["begin"]])
+                    else:
+                        instr1.append(i)
+
                 p[0]["code"] = (
                     p[3]["code"] + [p[0]["begin"] + " : "] + string
                 )  # + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
                 # p[0]["code"] = p[0]["code"] + [p[0]["continue"] + " : "] + string + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
                 p[0]["code"] = p[0]["code"] + [p[0]["after"] + " : "]
+                p[0]["instr"] = (
+                    p[3]["instr"]
+                    + [["Label", p[0]["begin"]]]
+                    + instr1
+                    + [["Label", p[0]["after"]]]
+                )
                 result = cppIterateStmt(
                     "for",
                     p[3]["data"][1],
@@ -1750,11 +2608,42 @@ def p_iteration_statement(p):
                     + p[6]["code"]
                     + ["goto->" + p[0]["begin"]]
                 )
+                instr = (
+                    p[5]["instr"]
+                    + [["ifz", p[5]["place"], p[0]["after"]]]
+                    + p[8]["instr"]
+                    + p[6]["instr"]
+                    + [["ifgoto", p[0]["begin"]]]
+                )
+
+                string = [
+                    "    goto->" + p[0]["after"] if i == "    break" else i
+                    for i in string
+                ]
+                string = [
+                    "    goto->" + p[0]["begin"] if i == "    continue" else i
+                    for i in string
+                ]
+                instr1 = []
+                for i in instr:
+                    if i[0] == "break":
+                        instr1.append(["ifgoto", p[0]["after"]])
+                    elif i[0] == "continue":
+                        instr1.append(["ifgoto", p[0]["begin"]])
+                    else:
+                        instr1.append(i)
+
                 p[0]["code"] = (
                     p[4]["code"] + [p[0]["begin"] + " : "] + string
                 )  # + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
                 # p[0]["code"] = p[0]["code"] + [p[0]["continue"] + " : "] + string + ["ifz " + p[5]["place"] + " goto->" + p[0]["after"]]
                 p[0]["code"] = p[0]["code"] + [p[0]["after"] + " : "]
+                p[0]["instr"] = (
+                    p[4]["instr"]
+                    + [["Label", p[0]["begin"]]]
+                    + instr1
+                    + [["Label", p[0]["after"]]]
+                )
                 result = cppIterateStmt(
                     "for_init",
                     (p[3]["data"][1], p[4]["data"][1]),
@@ -1780,21 +2669,26 @@ def p_jump_statement(p):
     if p[1] == "goto":
         result = cppJumpStmt("goto", cppId(p[2].value))
         p[0]["code"] = ["goto->" + p[2]["place"]]
+        p[0]["instr"] = [["ifgoto", p[2]["place"]]]
     elif p[1] == "break":
         result = cppJumpStmt("break", None)
         p[0]["code"] = ["    break"]
+        p[0]["instr"] = [["break"]]
     elif p[1] == "continue":
         result = cppJumpStmt("continue", None)
         p[0]["code"] = ["    continue"]
+        p[0]["instr"] = [["continue"]]
     elif p[1] == "return":
         if len(p) == 3:
             result = cppJumpStmt("return", None)
-            if "code" in p[2].keys():
-                p[0]["code"] = p[2]["code"] + ["    return"]
+            # if "code" in p[2].keys():
+            p[0]["code"] = ["    return"]
+            p[0]["instr"] = [["return_nothing"]]
         else:
             result = cppJumpStmt("return", p[2]["data"][1][0])
             if "code" in p[2].keys():
                 p[0]["code"] = p[2]["code"] + ["    return " + p[2]["place"]]
+                p[0]["instr"] = p[2]["instr"] + [["return", p[2]["place"]]]
 
     p[0]["data"] = ("jump_statement", result)
 
@@ -1807,14 +2701,22 @@ def p_translation_unit(p):
     p[0] = {}
 
     if len(p) == 2:
+
         result = [p[1]["data"][1]]
         if "code" in p[1].keys():
             p[0]["code"] = p[1]["code"].copy()
+            p[0]["instr"] = p[1]["instr"].copy()
     else:
-        result = p[1]["data"][1] + [p[2]["data"][1]]
-        if "code" in p[1].keys() and "code" in p[2].keys():
-            p[0]["code"] = p[1]["code"].copy() + p[2]["code"].copy()
 
+        result = p[1]["data"][1] + [p[2]["data"][1]]
+        p[0]["code"] = []
+        p[0]["instr"] = []
+        if "code" in p[1].keys():
+            p[0]["code"] = p[1]["code"].copy()
+            p[0]["instr"] = p[1]["instr"].copy()
+        if "code" in p[2].keys():
+            p[0]["code"] = p[0]["code"] + p[2]["code"].copy()
+            p[0]["instr"] = p[0]["instr"] + p[2]["instr"].copy()
     p[0]["data"] = ("translation_unit", result)
 
 
@@ -1824,14 +2726,9 @@ def p_external_declaration(p):
                          | declaration
     """
     p[0] = {}
-
-    if p[1]["data"][0] == "function_definition":
-        if "code" in p[1].keys():
-            p[0]["code"] = p[1]["code"].copy()
-    else:
-        if "code" in p[1].keys():
-            print("fgf")
-            p[0]["code"] = p[1]["code"].copy()
+    if "code" in p[1].keys():
+        p[0]["code"] = p[1]["code"].copy()
+        p[0]["instr"] = p[1]["instr"].copy()
 
     p[0]["data"] = ("external_declaration", p[1]["data"][1])
 
@@ -1843,8 +2740,36 @@ def p_function_definition(p):
                         | declarator declaration_list compound_statement
                         | declarator compound_statement
     """
+    global tmp_func, curr_param
+    global errors_found
     p[0] = {}
+    curr_scope = symboltab.get_current_scope()
+
     if p[1]["data"][0] == "type_specifier":
+        ###recursion case and undefined function checking###
+        for func in tmp_func:
+            if p[2]["data"][1].name.name not in func[0]:
+                print(
+                    f"Undeclared function with name {func[0]} used inside {p[2]['data'][1].name.name} at line {driver.lexer.lineno}"
+                )
+                errors_found += 1
+            else:
+                ###recursion case###
+                register_type[func[1]] = ("reg", p[1]["data"][1].typename)
+                if (
+                    p[3]["data"][0] == "compound_statement"
+                    and len(p[2]["data"][1].ddecl.param_list) != func[2]
+                ):
+                    len_params = len(p[2]["data"][1].ddecl.param_list)
+                    print(
+                        f"Function {p[2]['data'][1].name.name} expects {len_params} args, but {func[2]} were given at line {func[3]} at {driver.lexer.lineno}"
+                    )
+                    errors_found += 1
+                elif p[3]["data"][0] == "declaration_list" and func[2] > 0:
+                    print(
+                        f"Function {p[2]['data'][1].name.name} expects 0 args, but {func[2]} were given at line {func[3]} at {driver.lexer.lineno}"
+                    )
+                    errors_found += 1
 
         if p[3]["data"][0] == "declaration_list":
             result = cppFuncDef(
@@ -1854,7 +2779,7 @@ def p_function_definition(p):
             code = []
             if p[2]["data"][1].ddecl.param_list is not None:
                 for i in p[2]["data"][1].ddecl.param_list:
-                    code.append(i.pdec_type.typename)
+                    code.append(curr_scope.var_to_string_map[i.pdec_param.name.name])
             result = cppFuncDef(p[1]["data"][1], p[2]["data"][1], p[3]["data"][1])
             if "code" in p[3].keys():
                 stack = str(get_stack_size(p[2]["data"][1].name.name))
@@ -1864,6 +2789,32 @@ def p_function_definition(p):
                     + p[3]["code"]
                     + ["    Func_End"]
                 )
+                if p[2]["data"][1].name.name == "main":
+                    p[0]["instr"] = (
+                        [
+                            [
+                                "Function_Label:",
+                                p[2]["data"][1].name.name,
+                                p[1]["data"][1].typename,
+                            ]
+                        ]
+                        + [["Function_related"]]
+                        + p[3]["instr"]
+                        + [["main_end"]]
+                    )
+                else:
+                    p[0]["instr"] = (
+                        [
+                            [
+                                "Function_Label:",
+                                p[2]["data"][1].name.name,
+                                p[1]["data"][1].typename,
+                            ]
+                        ]
+                        + [["Function_related"]]
+                        + p[3]["instr"]
+                        + [["Function_End"]]
+                    )
     elif p[1]["data"][0] == "declarator":
         if p[2]["data"][0] == "declaration_list":
             result = cppFuncDef(
@@ -1871,7 +2822,12 @@ def p_function_definition(p):
             )
         elif p[2]["data"][0] == "compound_statement":
             result = cppFuncDef(None, p[1]["data"][1].name, None, p[2]["data"][1])
-
+    symboltab.cmpd_ctr += 1
+    symboltab.remove_scope_from_stack()
+    tmp_func, curr_param = (
+        [],
+        [],
+    )  ### temp func empty to check recursion for next function
     p[0]["data"] = ("function_definition", result)
 
 
@@ -1889,6 +2845,7 @@ class scopeInitialiser:
         self.scope_name = scope_name
         self.variables = {}
         self.constants = {}
+        self.pointers = {}
         self.structs = {}
         self.classes = {}
         self.temp_variables = {}
@@ -1932,13 +2889,14 @@ class symbolTable:
 
     def check_and_add_variable(self, variable, varType):
         global var_index
+        global errors_found
         curr_scope = self.get_current_scope()
 
         if curr_scope.find_variable(variable.name):
-
             print(
                 f"Variable re-declared with name {variable.name} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
         else:
             curr_scope.variables[variable.name] = varType
             x = "reg" + str(var_index)  # + "@" + str(curr_scope.scope_id)
@@ -1963,61 +2921,87 @@ class symbolTable:
 
         return x
 
+    def find_type(self, str1, str2):
+        if str1 in register_type.keys() and str2 in register_type.keys():
+            if register_type[str1][1] == "float" or register_type[str2][1] == "float":
+                return ("temp_reg", "float")
+            elif register_type[str1][1] == "int" or register_type[str2][1] == "int":
+                return ("temp_reg", "int")
+            else:
+                return ("temp_reg", "char")
+        elif str1 in register_type.keys():
+            return register_type[str1]
+        elif str2 in register_type.keys():
+            return register_type[str2]
+        else:
+            return ("temp_reg", "int")
+
     def check_undeclared_variable(self, variable):
         curr_scope = self.get_current_scope()
+        found = False
+        global errors_found
         while curr_scope:
             found = curr_scope.find_variable(variable.name)
             if found:
                 break
             curr_scope = curr_scope.parent
+
         if not found:
             print(
                 f"Undeclared variable used with name {variable.name} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
 
     def check_and_add_const(self, const, constType, constVal):
         curr_scope = self.get_current_scope()
+        global errors_found
         if curr_scope.find_variable(const):
             print(
                 f"Constant re-declared with name {const.name} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
 
         else:
             curr_scope.constants[const] = (constType, constVal)
 
     def check_and_add_struct(self, structTag: "cppId", structId: "cppId" = None):
         curr_scope = self.get_current_scope()
-
-        if curr_scope.find_struct(structId):
+        global errors_found
+        if curr_scope.find_struct(structId.name):
             print(
                 f"Struct re-declared with same name {structId.name} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
         else:
-            self.add_scope_to_stack(str(structTag.name) + "_struct")
+            # self.add_scope_to_stack(str(structTag.name) + "_struct")
             curr_scope.structs[structId.name] = structTag
 
     def check_and_add_function(
-        self, function_id, function_type, function_nparams, scope_id
+        self, function_id, function_type, function_nparams, func_param_list, scope_id
     ):
+        global errors_found
         if function_id.name in self.functions.keys():
             print(
                 f"Function re-declared with name {function_id.name} at line no {driver.lexer.lineno}"
             )
+            errors_found += 1
         else:
             # self.add_scope_to_stack(str(function_id.name) + "_function")
 
             self.functions[function_id.name] = (
                 function_type.typename,
                 function_nparams,
+                func_param_list,
             )
 
     def check_and_add_class(self, className: "cppId"):
         curr_scope = self.get_current_scope()
-
+        global errors_found
         if curr_scope.find_class(className):
             print(
                 f"Class re-declared with same name {className} at line no {driver.lexer.lineno}"
             )
+            errors_found += 1
         else:
             self.add_scope_to_stack(str(className.name))
             curr_scope.classes[className.name] = className
@@ -2027,38 +3011,62 @@ class symbolTable:
             self.scope_stack = self.scope_stack[:-1]
 
     def savecsv(self):
-        f = open("symboltable.csv", "w")
+        f = open("src/symboltable.csv", "w")
         writer = csv.writer(f)
         writer.writerow(
-            ["entity_name", "entity_type", "scope_id", "scope_name", "parent_scope_id"]
+            [
+                "entity_name",
+                "entity_type",
+                "entity_size",
+                "scope_name",
+                "parent_scope_name",
+                "variable_alias",
+            ]
         )
 
         for func in self.functions.keys():
-            writer.writerow([func, self.functions[func], "Function", 0, "Global", None])
+            writer.writerow([func, "Function", self.functions[func], "Global", None])
 
         for scope in self.scope_list:
+            if scope.scope_name == "Global":
+                continue
             for var in scope.variables.keys():
+                temp = scope.var_to_string_map[var]
                 if isinstance(scope.variables[var], list):
                     scope.variables[var] = scope.variables[var][0]
                 writer.writerow(
                     [
                         var,
                         scope.variables[var].typename,
+                        dtype_size[scope.variables[var].typename]
+                        * max(1, scope.string_to_var_map[temp][0].array_size),
                         "Variable",
-                        scope.scope_id,
                         scope.scope_name,
-                        scope.parent.scope_id if scope.parent else None,
+                        scope.parent.scope_name if scope.parent else None,
+                        temp,
                     ]
                 )
+
+            # for var in scope.temp_variables.keys():
+            #     writer.writerow(
+            #         [
+            #             var,
+            #             scope.temp_variables[var].typename,
+            #             4,
+            #             "Temp_Variable",
+            #             scope.scope_name,
+            #             scope.parent.scope_name if scope.parent else None,
+            #             var,
+            #         ]
+            #     )
             for struct in scope.structs.keys():
                 writer.writerow(
                     [
                         struct,
                         None,
                         "Structure",
-                        scope.scope_id,
                         scope.scope_name,
-                        scope.parent.scope_id if scope.parent else None,
+                        scope.parent.scope_name if scope.parent else None,
                     ]
                 )
             for cl in scope.classes.keys():
@@ -2067,9 +3075,8 @@ class symbolTable:
                         cl,
                         None,
                         "Class",
-                        scope.scope_id,
                         scope.scope_name,
-                        scope.parent.scope_id if scope.parent else None,
+                        scope.parent.scope_name if scope.parent else None,
                     ]
                 )
         f.close()
@@ -2081,8 +3088,6 @@ class symbolTable:
 # ------------------------ ------------------------
 # ------------------------ ------------------------
 
-
-errors = []
 
 global_scope = scopeInitialiser()
 symboltab = symbolTable(global_scope)
@@ -2113,52 +3118,23 @@ typecast_compat = {
 operators = {
     "arithmetic_op": ["+", "-", "*", "/", "%"],
     "assignment_op": ["=", "+=", "-=", "*=", "/=", "&=", "|=", "^=", ">>=", "<<="],
-    "bitwise_op": ["&", "|", "~", ">>", "<<"],
+    "bitwise_op": ["^", "&", "|", "~", ">>", "<<"],
     "boolean_op": ["&&", "||", "!"],
-    "comparison_op": [">", "<", "==", ">=", "<="],
+    "comparison_op": [">", "<", "==", ">=", "<=", "!="],
     "unary_op": ["++", "--", "sizeof", "~", "!", "&", "*", "+", "-"],
-    "postfix_op": ["++", "--", ".", "->"]
-    # Class/CPP (string) specific ops?
+    "postfix_op": ["++", "--", ".", "->"],
 }
 
-
-# operator_compat = {
-#     "arithmetic_op": ["char", "float", "int", "pointer"],
-#     "assignment_op": ["char", "float", "int", "string", "pointer"],
-#     "bitwise_op": ["int"],
-#     "boolean_op": ["int"],
-#     "comparison_op": ["char", "float", "int"],
-#     "unary_op": ["char", "float", "int"],
-#     "cast_op": ["char", "float", "int", "string", "pointer"],
-#     # Class/CPP (string) specific ops?
-# }
-
-# type_op_compat = {
-#     "char": ["arithmetic_op", "assignment_op", "comparison_op", "unary_op"],
-#     "float": ["arithmetic_op", "assignment_op", "comparison_op", "unary_op"],
-#     "int": [
-#         "arithmetic_op",
-#         "assignment_op",
-#         "bitwise_op",
-#         "boolean_op",
-#         "comparison_op",
-#         "unary_op",
-#     ],
-#     "pointer": ["assignment_op"],
-#     "string": ["assignment_op"]
-#     # Class/CPP (string) specific ops?
-# }
-
 operator_compat = {
-    "+": ["int", "char", "float"],
-    "-": ["int", "char", "float"],
-    "*": ["int", "char", "float"],
+    "+": ["int", "char", "float", "pointer_int", "pointer_float", "pointer_char"],
+    "-": ["int", "char", "float", "pointer_int", "pointer_float", "pointer_char"],
+    "*": ["int", "char", "float", "pointer_int", "pointer_char", "pointer_float"],
     "/": ["int", "char", "float"],
     "%": ["int"],
     "<<": ["int"],
     ">>": ["int"],
     "|": ["int"],
-    "&": ["int"],
+    "&": ["int", "float", "char"],
     "~": ["int"],
     "^": ["int"],
     "||": ["int", "char", "float"],
@@ -2166,18 +3142,19 @@ operator_compat = {
     "!": ["int", "char", "float"],
     ">": ["int", "char", "float"],
     ">=": ["int", "char", "float"],
+    "!=": ["int", "char", "float"],
     "<": ["int", "char", "float"],
     "<=": ["int", "char", "float"],
-    "=": ["int", "char", "float"],
+    "=": ["int", "char", "float", "pointer_int", "pointer_char", "pointer_float"],
     "++": ["int", "char", "float"],
     "--": ["int", "char", "float"],
+    "+=": ["int", "char", "float"],
+    "-=": ["int", "char", "float"],
+    "*=": ["int", "char", "float"],
+    "/=": ["int", "char", "float"],
     "func_call": ["int", "char", "float"],
     ".": ["int", "float", "char"],
     "==": ["int", "float", "char"],
-    "+=": ["int", "float", "char"],
-    "-=": ["int", "float", "char"],
-    "*=": ["int", "float", "char"],
-    "/=": ["int", "float", "char"],
     "arr_index": ["int"],
 }
 
@@ -2199,12 +3176,15 @@ class cppType:
         self.check()
 
     def check(self):
+        global errors_found
         if len(self.typename.split("_")) > 1:
             if self.typename.split("_")[1] not in allowed_native_types:
+                errors_found += 1
                 print("Invalid type")
         else:
             if self.typename not in allowed_native_types:
-                print(f"Invalid type {self.typename}.\n")
+                errors_found += 1
+                print(f"Invalid type {self.typename} at {driver.lexer.lineno}")
 
     def add_class_type(self, class_name: str):
         if class_name not in allowed_native_types:
@@ -2226,13 +3206,17 @@ class cppNode:
         # self.check()
 
     def check(self):
+        global errors_found
         if self.node_type.split("_")[
             1
         ] not in allowed_native_types or self.base_type not in allowed_native_types + [
             "struct",
             None,
         ]:
-            print(f"Incorrect type {self.node_type} / {self.base_type}.\n")
+            errors_found += 1
+            print(
+                f"Incorrect type {self.node_type} / {self.base_type} at {driver.lexer.lineno}"
+            )
             return False
 
     @staticmethod
@@ -2299,13 +3283,14 @@ class cppConst(cppNode):
 
 
 class cppId(cppNode):
-    def __init__(self, name: str, _type: cppType = cppType("int")):
+    def __init__(self, name: str, _type: cppType = cppType("int"), array_size: int = 0):
         super().__init__("identifier_" + str(_type.typename if _type else "None"), name)
-
+        self.array_size = array_size
         self.name = name
         self._type = _type
-
+        global errors_found
         if not (self.name[0]).isalpha():
+            errors_found += 1
             print(
                 "Invalid identifier name, should start with alphabets at line {}".format(
                     driver.lexer.lineno
@@ -2313,10 +3298,6 @@ class cppId(cppNode):
                 end="",
             )
             return None
-
-        # Symboltable check and add
-        # print(f"name: {self.name}\n")
-        # symboltab.check_and_add_variable(self.name, self._type)
 
     @staticmethod
     def traverse(object):
@@ -2383,12 +3364,9 @@ class cppStart(cppNode):
         graph_list = ["Start"]
 
         if obj is not None:
-            # print(obj.elements)
             lis = obj.elements[1]
-            # print(lis)
             for x in lis:
                 if x != [] and x != "" and x != None:
-                    # print(x)
                     graph_list.append(x.traverse(x))
 
         return graph_list
@@ -2402,22 +3380,14 @@ class cppStart(cppNode):
 
             if isinstance(ast, list):
                 current_index = node_index
-                # print(node_index, current_index)
-                # print(ast)
                 graph.add_node(pydot.Node(node_index, label=str(ast[0]), shape="egg"))
-                # if len(ast) == 3:
-                #     print('Hello')
-                #     print(ast[2])
-                # print(len(ast))
                 for x in ast[1:]:
-                    # print(x)
                     if x != []:
-                        # if current_index == None:
-                        #     continue
+                        if current_index == None:
+                            continue
                         nd = pydot.Edge(node_index, current_index + 1)
                         graph.add_edge(nd)
                         current_index = generate_graph(graph, x, current_index + 1)
-                # print(current_index)
                 return current_index
 
             elif isinstance(
@@ -2435,7 +3405,6 @@ class cppStart(cppNode):
                 print(f"{type(ast)} type not valid")
 
         ast = object.traverse(object)
-        # print(ast)
         generate_graph(graph, ast, 0)
         graph.get_node("0")[0].set_color("teal")
         return ast, graph
@@ -2454,7 +3423,7 @@ class cppExpr(cppNode):
         self.rhs = rhs
 
         self.op = op
-        # self.op_compat_types =
+        # self.op_compat_types = None
 
         # TODO: fix dict issues
 
@@ -2462,27 +3431,23 @@ class cppExpr(cppNode):
             operator_compat[self.op.op] if self.op is not None else allowed_native_types
         )
         self.expr_type = None
-        # print(lhs.node_type)
-        # print(lhs)
         if lhs and lhs.node_type:
             if len(lhs.node_type.split("_")) > 1:
-                self.expr_type = lhs.node_type.split("_")[1]
+                self.expr_type = lhs.node_type.split("_")[-1]
             else:
                 self.expr_type = lhs.node_type
 
         self.node_type = self.expr_type
         self.check()
 
-    # TODO: add array handling as in grammar
     def check(self):
-
+        global errors_found
         # Check lhs and rhs type compatible (binary exprs only)
         if not isinstance(self.rhs, list):
             if self.rhs is not None and self.lhs.expr_type != self.rhs.expr_type:
                 pass
                 # print("1766 ",self.rhs.pf_expr._type.typename,self.lhs.un_expr.pf_expr._type.typen)
                 # # Typecasting; If not possible return False
-                # # TODO: int-float typecasting priority
                 # if (
                 #     self.op.op != "cast"
                 #     and self.rhs.expr_type in typecast_compat[self.lhs.expr_type]
@@ -2497,7 +3462,7 @@ class cppExpr(cppNode):
                 # else:
                 #     print(self.lhs.un_expr.name, "   ", self.rhs.un_expr)
                 #     print(
-                #         f"Types {self.lhs.expr_type} and {self.rhs.expr_type} incompatible, cannot typecast.\n"
+                #         f"Types {self.lhs.expr_type} and {self.rhs.expr_type} incompatible, cannot typecast at {driver.lexer.lineno}"
                 #     )
                 #     return False
             #####NEED TO DISCUSS # print(f"Type mismatch on lhs and rhs at line {driver.lexer.lineno}")
@@ -2518,12 +3483,11 @@ class cppExpr(cppNode):
                     # elif self.lhs.expr_type in typecast_compat[self.rhs.expr_type]:
                     #     self.lhs = cppCastExpr(self.lhs, self.rhs.expr_type)
                     #     self.expr_type = self.rhs.expr_type
-
-                    # TODO: need to check typecasting
+                    ######NEED TO CHECK##########
                     # else:
                     #     # print(self.lhs.un_expr.name, "   ", s.un_expr)
                     #     print(
-                    #         f"Types {self.lhs.expr_type} and {s.expr_type} incompatible, cannot typecast.\n"
+                    #         f"Types {self.lhs.expr_type} and {s.expr_type} incompatible, cannot typecast at {driver.lexer.lineno}"
                     #     )
                     #     return False
 
@@ -2535,8 +3499,9 @@ class cppExpr(cppNode):
             and self.lhs.node_type.split("_")[1] not in self.op_compat_types
         ):
             print(
-                f"Operator {self.op} not compatible with type {self.lhs.node_type.split('_')[1]}.\n"
+                f"Operator {self.op.op} not compatible with type {self.lhs.node_type.split('_')[1]} at {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         if (
@@ -2547,8 +3512,9 @@ class cppExpr(cppNode):
             and self.lhs.node_type.split("_")[1] not in self.op_compat_types
         ):
             print(
-                f"Operator {self.op} not compatible with type {self.lhs.node_type.split('_')[1]}.\n"
+                f"Operator {self.op.op} not compatible with type {self.lhs.node_type.split('_')[1]} at {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         # Check op compatible with expr types (after typecasting success)
@@ -2558,13 +3524,16 @@ class cppExpr(cppNode):
             and self.lhs
             and not isinstance(self.lhs, cppId)
             and not isinstance(self.lhs, cppConst)
-            and self.lhs.expr_type not in self.op_compat_types
             and self.lhs.expr_type is not None
+            and not isinstance(self.lhs.expr_type, str)
+            and self.lhs.expr_type.typename not in self.op_compat_types
             and self.lhs.expr_type != ""
         ):
             print(
-                f"Operator {self.op.op} not compatible with type {self.lhs.expr_type}.\n"
+                f"Operator {self.op.op} not compatible with type {self.lhs.expr_type.typename} at {driver.lexer.lineno}"
             )
+
+            errors_found += 1
             return False
 
         return True
@@ -2578,7 +3547,6 @@ class cppExpr(cppNode):
         ]
 
 
-# TODO: Array indexing and function call handling
 class cppPostfixExpr(cppExpr):
     def __init__(
         self,
@@ -2587,52 +3555,84 @@ class cppPostfixExpr(cppExpr):
         pf_offset: Union[cppId, cppConst] = None,
         pf_id: cppExpr = None,
     ):
-        super().__init__(pf_expr, pf_op, pf_id)
-        #     return False
+        super().__init__(pf_expr, None, None)
+        global global_structs
+        global errors_found
 
         self.pf_expr = pf_expr
         self.pf_op = pf_op
         self.pf_id = pf_id
         self.pf_offset = pf_offset
-        if isinstance(pf_offset, cppId):
-            self.pf_offset = pf_offset.name
-        elif isinstance(pf_offset, cppConst):
-            self.pf_offset = pf_offset.val
-
+        # if isinstance(self.pf_offset, cppArithExpr):
+        #     pass
+        # if isinstance(pf_offset, cppId):
+        #     self.pf_offset = pf_offset.name
+        # elif isinstance(pf_offset, cppConst):
+        #     self.pf_offset = pf_offset.val
         self.expr_type = None
         if isinstance(self.pf_expr, cppConst):
-            self.expr_type = self.pf_expr._type.typename
+            self.expr_type = self.pf_expr._type
         elif isinstance(self.pf_expr, cppId):
             if self.pf_expr.name in symboltab.get_current_scope().variables.keys():
-                self.expr_type = (
+                self.expr_type = cppType("int")
+                self.expr_type.typename = (
                     symboltab.get_current_scope().variables[self.pf_expr.name].typename
                 )
+                self.pf_expr._type.typename = self.expr_type.typename
+
+        elif isinstance(self.pf_expr, cppPostfixExpr):
+            if self.pf_op and self.pf_op.op == ".":
+                # struct_scope = None
+                # for scope in symboltab.scope_list:
+                #     print(scope.scope_name)
+                #     if scope.scope_name == self.pf_expr.pf_expr.name + "_struct":
+                #         struct_scope = scope
+                #         break
+                # if self
+                struct_type = (
+                    symboltab.get_current_scope()
+                    .variables[self.pf_expr.pf_expr.name]
+                    .typename.split("_")[0]
+                )
+
+                if struct_type in global_structs.keys():
+
+                    if self.pf_id.name in global_structs[struct_type].keys():
+                        self.expr_type = global_structs[struct_type][self.pf_id.name][0]
+                    else:
+                        print(
+                            f"Invalid field {self.pf_id.name} for struct {self.pf_expr.pf_expr.name} at line {driver.lexer.lineno}"
+                        )
+                        errors_found += 1
+                else:
+                    print(
+                        f"Struct {self.pf_expr.pf_expr.name} used without initialization at line {driver.lexer.lineno}"
+                    )
+                    errors_found += 1
 
         elif isinstance(self.pf_expr, cppExpr):
             self.expr_type = self.pf_expr.expr_type
 
-        # if isinstance(self.pf_expr, cppPostfixExpr):
-        #     print("sfsfddsf")
-        #     print(self.pf_expr.pf_expr.name)
-        # else:
-        #     print(self.pf_expr.name)
         self.check_pf()
 
     def check_pf(self):
+        global errors_found
         # Only int / float can have ++, --
         if (
             self.pf_op
             and self.pf_op.op in ["++", "--"]
-            and self.pf_expr.expr_type
+            and self.pf_expr.expr_type.typename
             not in [
                 "int",
                 "float",
+                "char",
             ]
             and self.pf_expr.expr_type != ""
         ):
             print(
-                f"Invalid operator {self.pf_op.op} for type {self.pf_expr.expr_type} at line {driver.lexer.lineno}.\n"
+                f"Invalid operator {self.pf_op.op} for type {self.pf_expr.expr_type.typename} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
 
         # Only pointer to struct can have -> op
         if (
@@ -2641,15 +3641,17 @@ class cppPostfixExpr(cppExpr):
             and self.pf_expr.base_type != "struct"
         ):
             print(
-                f"Invalid operator {self.pf_op} for pointer to type {self.pf_expr.expr_type} at line {driver.lexer.lineno}.\n"
+                f"Invalid operator {self.pf_op.op} for pointer to type {self.pf_expr.expr_type.typename} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         # invalid field name for struct
         if self.pf_op == "->" and self.pf_id is None:
             print(
-                f"Invalid field {self.pf_id} to struct pointer {self.pf_expr} for '->' operator at line {driver.lexer.lineno}.\n"
+                f"Invalid field {self.pf_id} to struct pointer {self.pf_expr} for '->' operator at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         # idx = 0
@@ -2662,24 +3664,29 @@ class cppPostfixExpr(cppExpr):
         #     not symboltab.scope_list[idx].find_variable(self.pf_id)
         # ):
         #     print(
-        #         f"Invalid field name {self.pf_id} to struct pointer {self.pf_expr} at line {driver.lexer.lineno}.\n"
+        #         f"Invalid field name {self.pf_id} to struct pointer {self.pf_expr} at line {driver.lexer.lineno}"
         #     )
         #     return False
 
-        # # Only struct can have . op
-        # if self.pf_op == "." and self.pf_expr.expr_type != "struct":
-        #     print(
-        #         f"Invalid type {self.pf_expr.expr_type} for '.'operator at line {driver.lexer.lineno}.\n"
-        #     )
-        #     return False
+        # Only struct can have . op
+
+        if (
+            self.pf_op
+            and self.pf_op.op == "."
+            and self.pf_expr.expr_type
+            and self.pf_expr.expr_type.typename.split("_")[1] != "struct"
+        ):
+            print(
+                f"Invalid type {self.pf_expr.expr_type.typename} for '.'operator at line {driver.lexer.lineno}"
+            )
+            errors_found += 1
+            return False
 
         return True
 
     @staticmethod
     def traverse(object):
-        # pass
         graph_list = []
-        # print(object.pf_expr)
         # if isinstance(object.pf_expr, cppPostfixExpr):
         if object.pf_expr is not None:
             graph_list.append(object.pf_expr.traverse(object.pf_expr))
@@ -2699,11 +3706,36 @@ class cppUnExpr(cppExpr):
         self.un_expr = un_expr
         self.un_op = un_op
         self.expr_type = self.un_expr.expr_type
+        global errors_found
+
+        if self.un_op and self.un_expr.expr_type and self.un_op.op == "&":
+            if "pointer" not in self.expr_type.typename:
+                self.expr_type.typename = "pointer_" + self.un_expr.expr_type.typename
+            self.un_expr.expr_type.typename = self.expr_type.typename
+            # if isinstance(self.un_expr, cppPostfixExpr):
+            #     self.un_expr.pf_expr.expr_type.typename = self.expr_type.typename
+
+        elif self.un_op and self.un_expr.expr_type and self.un_op.op == "*":
+            if len(self.un_expr.expr_type.typename.split("_")) > 1:
+                self.expr_type.typename = self.un_expr.expr_type.typename.split("_")[1]
+            else:
+                print(
+                    f"Invalid type {self.un_expr.expr_type.typename} dereferenced at line {driver.lexer.lineno}"
+                )
+                errors_found += 1
+
+        if (
+            isinstance(self.un_expr, cppPostfixExpr)
+            and self.un_expr.pf_op
+            and self.un_expr.pf_op.op == "."
+        ):
+            self.un_expr.expr_type = self.un_expr.pf_id._type
+            self.expr_type = self.un_expr.expr_type
 
         self.check_un()
 
     def check_un(self):
-
+        global errors_found
         # Only int / float can have unary op, if & used for pointer then var should have been inited
         if isinstance(self.un_expr, cppCastExpr):
             if (
@@ -2713,16 +3745,18 @@ class cppUnExpr(cppExpr):
             ):
 
                 print(
-                    f"Invalid type {self.un_expr.expr_type} for {self.un_op} operator at line {driver.lexer.lineno}.\n"
+                    f"Invalid type {self.un_expr.expr_type} for {self.un_op} operator at line {driver.lexer.lineno}"
                 )
+                errors_found += 1
                 return False
 
             if self.un_op == "&" and not symboltab.get_current_scope().find_variable(
                 self.un_expr.lhs.node_name
             ):
                 print(
-                    f"Variable {self.un_expr.lhs.node_name} referenced without initialization at line {driver.lexer.lineno}.\n"
+                    f"Variable {self.un_expr.lhs.node_name} referenced without initialization at line {driver.lexer.lineno}"
                 )
+                errors_found += 1
                 return False
 
         if (
@@ -2734,27 +3768,27 @@ class cppUnExpr(cppExpr):
                 "float",
             ]:
                 print(
-                    f"Invalid type {self.un_expr.expr_type} for {self.un_op} operator at line {driver.lexer.lineno}.\n"
+                    f"Invalid type {self.un_expr.expr_type} for {self.un_op} operator at line {driver.lexer.lineno}"
                 )
+                errors_found += 1
                 return False
 
         if self.un_op == "*" and self.un_expr.expr_type != "pointer":
             print(
-                f"Invalid de-referencing for a non-pointer expression {self.un_expr} at line {driver.lexer.lineno}.\n"
+                f"Invalid de-referencing for a non-pointer expression {self.un_expr} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
             # elif self.un_op == SIZEOF and self.un_expr.expr_type not in allowed_native_types:
-            #     print(f"Invalid type {self.un_expr.expr_type} for {self.un_op} operator.\n")
+            #     print(f"Invalid type {self.un_expr.expr_type} for {self.un_op} operator at {driver.lexer.lineno}")
             #     return False
 
         return True
 
     @staticmethod
     def traverse(object):
-        # print(object)
         graph_list = []
         if object.un_expr is not None:
-            # print(object.un_expr)
             graph_list.append(object.un_expr.traverse(object.un_expr))
         if object.un_op is not None:
             graph_list.append(object.un_op.op)
@@ -2774,17 +3808,17 @@ class cppCastExpr(cppExpr):
         self.expr_type = self.new_type
 
         if self.check_cast():
-            # print("reached const typing")
             if len(self.init_type.split("_")) > 1:
                 if self.init_type.split("_")[0] == "constant":
-                    # print("reached const typing")
                     self.cast_expr = cppConst(self.cast_expr.un_expr.lhs, self.new_type)
 
     def check_cast(self):
+        global errors_found
         if self.new_type not in typecast_compat[self.init_type]:
             print(
-                f"Invalid type {self.new_type} for typecasting variable of type {self.init_type} at line {driver.lexer.lineno}.\n"
+                f"Invalid type {self.new_type} for typecasting variable of type {self.init_type} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         return True
@@ -2806,39 +3840,80 @@ class cppArithExpr(cppExpr):
         self.cast_rhs = cast_rhs
         self.cast_op = cast_op
 
-        # print(self.cast_rhs.expr_type)
+        if isinstance(self.expr_type, str):
+            self.expr_type = cppType(self.expr_type)
+
+        if isinstance(self.lhs, cppPostfixExpr) and isinstance(self.lhs.pf_expr, cppId):
+            self.lhs.expr_type = self.lhs.pf_expr._type
+
+        elif isinstance(self.lhs, cppPostfixExpr) and isinstance(
+            self.lhs.pf_expr, cppPostfixExpr
+        ):
+            if self.lhs.pf_op and self.lhs.pf_op.op == ".":
+                if (
+                    self.lhs.pf_expr.pf_expr._type.typename.split("_")[0]
+                    in global_structs.keys()
+                ):
+                    self.lhs.expr_type = cppType(
+                        global_structs[
+                            self.lhs.pf_expr.pf_expr._type.typename.split("_")[0]
+                        ][self.lhs.pf_id.name][0]
+                    )
+
+        if isinstance(self.rhs, cppPostfixExpr) and isinstance(self.rhs.pf_expr, cppId):
+            self.rhs.expr_type = self.rhs.pf_expr._type
+
+        elif isinstance(self.rhs, cppPostfixExpr) and isinstance(
+            self.rhs.pf_expr, cppPostfixExpr
+        ):
+            if self.rhs.pf_op and self.rhs.pf_op.op == ".":
+                if (
+                    self.rhs.pf_expr.pf_expr._type.typename.split("_")[0]
+                    in global_structs.keys()
+                ):
+                    self.rhs.expr_type = cppType(
+                        global_structs[
+                            self.rhs.pf_expr.pf_expr._type.typename.split("_")[0]
+                        ][self.rhs.pf_id.name][0]
+                    )
 
         self.check_arith()
 
     def check_arith(self):
+        global errors_found
         if self.op.op not in operators["arithmetic_op"]:
             print(
-                f"Invalid operator {self.op.op} for arithmetic expression at line {driver.lexer.lineno}.\n"
+                f"Invalid operator {self.op.op} for arithmetic expression at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         if (
-            self.lhs.expr_type not in operator_compat[self.op.op]
-            and self.lhs.expr_type != ""
+            self.lhs.expr_type
+            and self.lhs.expr_type.typename not in operator_compat[self.op.op]
+            and self.lhs.expr_type.typename != ""
         ):
             print(
-                f"Operator {self.op.op} not compatible with type {self.lhs.expr_type} at line {driver.lexer.lineno}.\n"
+                f"Operator {self.op.op} not compatible with type {self.lhs.expr_type.typename} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         if (
-            self.rhs.expr_type not in operator_compat[self.op.op]
-            and self.rhs.expr_type != ""
+            self.rhs.expr_type
+            and self.rhs.expr_type.typename not in operator_compat[self.op.op]
+            and self.rhs.expr_type.typename != ""
         ):
             print(
-                f"Operator {self.op.op} not compatible with type {self.rhs.expr_type} at line {driver.lexer.lineno}.\n"
+                f"Operator {self.op.op} not compatible with type {self.rhs.expr_type.typename} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         # if self.lhs.expr_type != self.rhs.expr_type:
         #     if self.rhs.expr_type not in typecast_compat[self.lhs.expr_type] and \
         #        self.lhs.expr_type not in typecast_compat[self.rhs.expr_type]:
-        #         print(f"Invalid types {self.lhs.expr_type} and {self.rhs.expr_type} for arithmetic expression.\n")
+        #         print(f"Invalid types {self.lhs.expr_type} and {self.rhs.expr_type} for arithmetic expression at {driver.lexer.lineno}")
         #         return False
 
         return True
@@ -2860,7 +3935,6 @@ class cppShiftExpr(cppExpr):
         self, shift_lhs: cppArithExpr, shift_op: cppOp, shift_rhs: cppArithExpr
     ):
         super().__init__(shift_lhs, shift_op, shift_rhs)
-        #     return False
 
         self.shift_lhs = shift_lhs
         self.shift_rhs = shift_rhs
@@ -2879,7 +3953,6 @@ class cppShiftExpr(cppExpr):
 class cppRelationExpr(cppExpr):
     def __init__(self, rel_lhs: cppShiftExpr, rel_op: cppOp, rel_rhs: cppShiftExpr):
         super().__init__(rel_lhs, rel_op, rel_rhs)
-        #     return False
 
         self.rel_lhs = rel_lhs
         self.rel_rhs = rel_rhs
@@ -2888,16 +3961,17 @@ class cppRelationExpr(cppExpr):
         self.check_relexpr()
 
     def check_relexpr(self):
-
+        global errors_found
         if self.rel_op.op not in operators["comparison_op"]:
             print(
-                f"Invalid operator {self.rel_op} for relational expression at line {driver.lexer.lineno}.\n"
+                f"Invalid operator {self.rel_op.op} for relational expression at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         # if self.rel_lhs.expr_type != self.rel_rhs.expr_type:
         #     print(
-        #         f"Operator {self.rel_op} not compatible with different types {self.rel_lhs.expr_type} and {self.rel_rhs.expr_type}.\n"
+        #         f"Operator {self.rel_op} not compatible with different types {self.rel_lhs.expr_type} and {self.rel_rhs.expr_type} at {driver.lexer.lineno}"
         #     )
         # k_type = ""
         # for k, v in operators.items():
@@ -2908,27 +3982,29 @@ class cppRelationExpr(cppExpr):
         if (
             self.rel_lhs
             and self.rel_lhs.expr_type
-            and self.rel_lhs.expr_type not in operator_compat[self.rel_op.op]
+            and self.rel_lhs.expr_type.typename not in operator_compat[self.rel_op.op]
         ):
             print(
-                f"Operator {self.rel_op} not compatible with type {self.rel_lhs.expr_type} at line.\n"
+                f"Operator {self.rel_op.op} not compatible with type {self.rel_lhs.expr_type.typename} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         elif (
-            self.rel_lhs
-            and self.rel_lhs.expr_type
-            and self.rel_rhs.expr_type not in operator_compat[self.rel_op.op]
+            self.rel_rhs
+            and self.rel_rhs.expr_type
+            and self.rel_rhs.expr_type.typename not in operator_compat[self.rel_op.op]
         ):
             print(
-                f"Operator {self.rel_op} not compatible with type {self.rel_rhs.expr_type} at line .\n"
+                f"Operator {self.rel_op.op} not compatible with type {self.rel_rhs.expr_type.typename} at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         # if self.lhs.expr_type != self.rhs.expr_type:
         #     if self.rhs.expr_type not in typecast_compat[self.lhs.expr_type] and \
         #        self.lhs.expr_type not in typecast_compat[self.rhs.expr_type]:
-        #         print(f"Invalid types {self.lhs.expr_type} and {self.rhs.expr_type} for relational expression.\n")
+        #         print(f"Invalid types {self.lhs.expr_type} and {self.rhs.expr_type} for relational expression at {driver.lexer.lineno}")
         #         return False
 
         return True
@@ -2960,20 +4036,23 @@ class cppLogicExpr(cppExpr):
         self.check_logic()
 
     def check_logic(self):
+        global errors_found
         if (
-            self.l_op not in operators["bitwise_op"]
-            and self.l_op not in operators["boolean_op"]
+            self.l_op.op not in operators["bitwise_op"]
+            and self.l_op.op not in operators["boolean_op"]
         ):
             print(
-                f"Invalid operator {self.l_op} for logical expression at line {driver.lexer.lineno}.\n"
+                f"Invalid operator {self.l_op.op} for logical expression at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         # Single expression should have unary ops only
-        if self.l_rhs is None and self.l_op not in ["!", "~"]:
+        if self.l_rhs is None and self.l_op.op not in ["!", "~"]:
             print(
-                f"Invalid binary operator {self.l_op} for unary logical expression at line {driver.lexer.lineno}.\n"
+                f"Invalid binary operator {self.l_op.op} for unary logical expression at line {driver.lexer.lineno}"
             )
+            errors_found += 1
             return False
 
         return True
@@ -3010,18 +4089,158 @@ class cppAssignExpr(cppExpr):
         self.unaryexpr = unaryexpr
         self.assign_op = assign_op
         self.assign_expr = assign_expr
-
         self.check_assign()
+        global errors_found
+
+        # if isinstance(self.unaryexpr.un_expr, cppPostfixExpr) and self.unaryexpr.un_expr.pf_op.op == ".":
+        #     # check field memership
+        #     _struct_type = None
+        #     if self.unaryexpr.un_expr.pf_expr.pf_expr.name in symboltab.get_current_scope().variables.keys():
+        #         _struct_type = symboltab.get_current_scope().variables[self.unaryexpr.un_expr.pf_expr.pf_expr.name].typename.split("_")[0]
+
+        #     if self.unaryexpr.un_expr.pf_id.name not in global_structs[_struct_type].keys():
+        #         print(f'Invalid field {self.unaryexpr.un_expr.pf_id.name} for struct object of type {_struct_type} at line {driver.lexer.lineno}')
+
+        if (
+            self.unaryexpr
+            and self.assign_expr
+            and self.unaryexpr.expr_type
+            and self.assign_expr.expr_type
+        ):
+            if (
+                isinstance(self.unaryexpr.expr_type, cppType)
+                and isinstance(self.assign_expr.expr_type, cppType)
+                and self.unaryexpr.expr_type.typename
+                != self.assign_expr.expr_type.typename
+            ):
+                if (
+                    "pointer" in self.unaryexpr.expr_type.typename
+                    or "pointer" in self.assign_expr.expr_type.typename
+                ):
+                    errors_found += 1
+                    print(
+                        f"Type mismatch for assignment, got types {self.unaryexpr.expr_type.typename} and {self.assign_expr.expr_type.typename} at line {driver.lexer.lineno}"
+                    )
+            elif (
+                isinstance(self.unaryexpr.expr_type, str)
+                and isinstance(self.assign_expr.expr_type, str)
+                and self.unaryexpr.expr_type != self.assign_expr.expr_type
+            ):
+                if (
+                    "pointer" in self.unaryexpr.expr_type.typename
+                    or "pointer" in self.assign_expr.expr_type.typename
+                ):
+                    errors_found += 1
+                    print(
+                        f"Type mismatch for assignment, got types {self.unaryexpr.expr_type} and {self.assign_expr.expr_type} at line {driver.lexer.lineno}"
+                    )
+
+            if isinstance(self.unaryexpr.un_expr, cppPostfixExpr) and isinstance(
+                self.assign_expr, cppPostfixExpr
+            ):
+                if isinstance(self.unaryexpr.un_expr.pf_expr, cppId) and isinstance(
+                    self.assign_expr.pf_expr, cppId
+                ):
+                    if (
+                        "pointer" in self.unaryexpr.un_expr.pf_expr._type.typename
+                        and "pointer" in self.assign_expr.pf_expr._type.typename
+                    ):
+                        if (
+                            self.unaryexpr.un_expr.pf_expr._type.typename.split("_")[1]
+                            != self.assign_expr.pf_expr._type.typename.split("_")[1]
+                        ):
+                            pass
+                        else:
+                            if (
+                                self.assign_expr.pf_expr.name
+                                in symboltab.get_current_scope().pointers.keys()
+                            ):
+                                symboltab.get_current_scope().pointers[
+                                    self.unaryexpr.un_expr.pf_expr.name
+                                ] = symboltab.get_current_scope().pointers[
+                                    self.assign_expr.pf_expr.name
+                                ]
+                            else:
+                                errors_found += 1
+                                print(
+                                    f"Cannot assign {self.unaryexpr.un_expr.pf_expr.name} to uninitialized pointer {self.assign_expr.pf_expr.name} at line {driver.lexer.lineno}"
+                                )
+
+        if isinstance(self.assign_expr, cppUnExpr):
+            # p = &x
+            if not symboltab.get_current_scope().find_variable(
+                self.assign_expr.un_expr.pf_expr.name
+            ):
+                errors_found += 1
+                print(
+                    f"Pointer to variable {self.assign_expr.un_expr.pf_expr.name} referenced without initialization at line {driver.lexer.lineno}"
+                )
+            else:
+                if isinstance(self.unaryexpr.un_expr, cppUnExpr):
+
+                    # \*p = \*x case
+                    if (
+                        self.unaryexpr.un_expr.un_expr.pf_expr.name
+                        not in symboltab.get_current_scope().pointers.keys()
+                    ):
+                        errors_found += 1
+                        print(
+                            f"Variable {self.unaryexpr.un_expr.un_expr.pf_expr.name} dereferenced without initialization as pointer at line {driver.lexer.lineno}"
+                        )
+
+                    elif (
+                        self.assign_expr.un_expr.pf_expr.name
+                        not in symboltab.get_current_scope().pointers.keys()
+                    ):
+                        errors_found += 1
+                        print(
+                            f"Variable {self.assign_expr.un_expr.pf_expr.name} dereferenced without initialization as pointer at line {driver.lexer.lineno}"
+                        )
+                    else:
+                        symboltab.get_current_scope().pointers[
+                            self.unaryexpr.un_expr.un_expr.pf_expr.name
+                        ] = self.assign_expr.un_expr.pf_expr.name
+
+                else:
+                    symboltab.get_current_scope().pointers[
+                        self.unaryexpr.un_expr.pf_expr.name
+                    ] = self.assign_expr.un_expr.pf_expr.name
+
+        elif isinstance(self.assign_expr, cppPostfixExpr):
+
+            # \*p = 2 or \*p = x
+            if (
+                isinstance(self.unaryexpr.un_expr, cppUnExpr)
+                and isinstance(self.unaryexpr.un_expr.un_expr, cppPostfixExpr)
+                # and "pointer" in self.unaryexpr.expr_type.typename
+                and self.unaryexpr.un_expr.un_expr.pf_expr.name
+                not in symboltab.get_current_scope().pointers.keys()
+            ):
+                errors_found += 1
+                print(
+                    f"Cannot assign value to pointer {self.unaryexpr.un_expr.un_expr.pf_expr.name} without pointing to legitimate address at line {driver.lexer.lineno}"
+                )
+            if isinstance(self.assign_expr.pf_expr, cppId):
+                if not symboltab.get_current_scope().find_variable(
+                    self.assign_expr.pf_expr.name
+                ):
+                    if self.assign_expr.pf_expr.name not in curr_param:
+                        errors_found += 1
+                        print(
+                            f"Variable {self.assign_expr.pf_expr.name} assigned without initialization at line {driver.lexer.lineno}"
+                        )
 
     def check_assign(self):
         # Pointer cannot be assigned anything other than pointer / int
+        global errors_found
         if (
             self.assign_op in operators["assignment_op"]
             and self.lhs.node_type == "pointer"
             and self.rhs.node_type not in ["int", "pointer"]
         ):
+            errors_found += 1
             print(
-                f"Pointer {self.unaryexpr} cannot be assigned to non-pointer / non-int {self.assign_expr} at line {driver.lexer.lineno}.\n"
+                f"Pointer {self.unaryexpr} cannot be assigned to non-pointer / non-int {self.assign_expr} at line {driver.lexer.lineno}"
             )
             return False
 
@@ -3047,14 +4266,11 @@ class cppAssignExpr(cppExpr):
 class cppInitializer(cppNode):
     def __init__(self, init_expr: Union[cppAssignExpr, List["cppInitializer"]]):
         self.init_expr = init_expr
-        # TODO: If list of initializer, make new scope
-        # TODO: checking list["type"]
         self.check_init()
 
     def check_init(self):
         if isinstance(self.init_expr, cppAssignExpr):
             self.init_expr.check_assign()
-        # TODO
         # elif isinstance(self.init_expr, list) and isinstance(
         #     self.init_expr[0], "cppInitializer"
         # ):
@@ -3065,11 +4281,9 @@ class cppInitializer(cppNode):
         return True
 
 
-# TODO
 class cppAbsDeclarator(cppNode):
     def __init__(self, adec_dadec: "cppDirectAbsDeclarator"):
         super().__init__("abstract_declarator")
-        #     return False
 
         self.check_adec()
 
@@ -3089,7 +4303,6 @@ class cppDirectAbsDeclarator(cppNode):
     ):
 
         super().__init__("direct_abstract_declarator")
-        #     return False
 
         self.dadec = dadec
         self.adec = adec
@@ -3115,22 +4328,20 @@ class cppDirectDeclarator(cppNode):
         dec_flag: int = 0,
     ):
         super().__init__("direct_declarator")
-        #     return False
-
         self.name = name
+        if self.name and arr_offset:
+            self.name.array_size = arr_offset.pf_expr.val if arr_offset else None
         self.dec_declarator = dec_declarator
         self.dec_type = dec_type
         self.arr_offset = arr_offset
         self.dec_flag = dec_flag
         self.param_list = param_list
-        # print(self.arr_offset)
         if self.dec_flag == 7:
             self.name = self.dec_declarator.name
         if self.dec_flag == 3:
             self.name = self.dec_declarator.name
 
         self.check_ddecl()
-        # return None
 
     def check_ddecl(self):
         return True
@@ -3139,10 +4350,8 @@ class cppDirectDeclarator(cppNode):
 class cppInitDeclarator(cppNode):
     def __init__(self, declarator: "cppDeclarator", initializer: cppInitializer):
         super().__init__("init_declarator")
-        #     return False
 
         self.declarator = declarator
-        # print(self.declarator.arr_offset)
         self.initializer = initializer
         self.check_initdeclarator()
 
@@ -3167,9 +4376,14 @@ class cppInitDeclarator(cppNode):
     def traverse(obj):
         result = []
         if obj.initializer is not None:
-            result.append(
-                (obj.declarator.name.name, obj.initializer.init_expr.pf_expr.val)
-            )
+            if isinstance(obj.initializer.init_expr.pf_expr, cppConst):
+                result.append(
+                    (obj.declarator.name.name, obj.initializer.init_expr.pf_expr.val)
+                )
+            elif isinstance(obj.initializer.init_expr.pf_expr, cppId):
+                result.append(
+                    (obj.declarator.name.name, obj.initializer.init_expr.pf_expr.name)
+                )
         else:
             result.append((obj.declarator.name.name, None))
         return result
@@ -3178,7 +4392,6 @@ class cppInitDeclarator(cppNode):
 class cppInitDecls(cppNode):
     def __init__(self, init_decls: List[cppInitDeclarator]):
         super().__init__("init_declarators")
-        #     return False
 
         self.init_decls = init_decls
         self.check_initdecls()
@@ -3207,17 +4420,15 @@ class cppDeclarator(cppNode):
         is_pointer: bool = False,
     ):
         super().__init__("declarator")
-        #     return False
 
         self.name = name
-        # print(ddecl)
+        self.ddecl = ddecl
         if ddecl is not None:
             self.arr_offset = ddecl.arr_offset
         else:
             self.arr_offset = None
 
         self.is_pointer = is_pointer
-        self.ddecl = ddecl
 
     def check_decl(self):
         return True
@@ -3230,52 +4441,152 @@ class cppDeclarator(cppNode):
 
 
 class cppDeclaration(cppNode):
-    def __init__(self, decl_type: cppType, initdecl_list: cppInitDecls):
+    def __init__(
+        self,
+        decl_type: cppType,
+        initdecl_list: cppInitDecls,
+        add_to_symboltab: bool = True,
+    ):
         super().__init__("declaration")
 
-        self.decl_type = decl_type
+        if isinstance(decl_type, list):
+            self.decl_type = decl_type[0]
+        else:
+            self.decl_type = decl_type
         self.initdecl_list = initdecl_list
         self.cmpd_idx = symboltab.cmpd_ctr
-        if (
-            symboltab.get_current_scope().scope_name[5:] == str(symboltab.cmpd_ctr)
-            or symboltab.get_current_scope().scope_name == "Global"
-        ):
-            symboltab.add_scope_to_stack(f"cmpd_{symboltab.cmpd_ctr+1}")
+        self.add_to_symboltab = add_to_symboltab
+        if symboltab.get_current_scope().scope_name == "Global" and initdecl_list:
+            symboltab.add_scope_to_stack(f"cmpd_{symboltab.cmpd_ctr}")
+        # elif (
+        #     symboltab.get_current_scope().scope_name[5:] == str(symboltab.cmpd_ctr)
+        # ):
+        #     symboltab.add_scope_to_stack(f"cmpd_{symboltab.cmpd_ctr+1}")
         self.check_declaration()
 
     def check_declaration(self):
+        global errors_found
         if self.initdecl_list is not None:
             for init in self.initdecl_list:
                 # Void assignment invalid
-                # print(init.declarator)
+
                 if self.decl_type == "void":
                     print(
-                        f"Void variable {init.name} cannot be assigned a value at line {driver.lexer.lineno}.\n"
+                        f"Void variable {init.name} cannot be assigned a value at line {driver.lexer.lineno}"
                     )
+                    errors_found += 1
                     return False
+
                 # Array offset check
                 if (
                     init.declarator.arr_offset
                     and init.declarator.arr_offset.pf_expr._type.typename != "int"
                 ):
                     print(
-                        f"Array offset {init.declarator.arr_offset.pf_expr.val} must be of int type at line {driver.lexer.lineno}.\n"
+                        f"Array size {init.declarator.arr_offset.pf_expr.val} must be of int type at line {driver.lexer.lineno}"
                     )
+                    errors_found += 1
                     return False
 
                 # Redeclaring variable
-
                 if symboltab.get_current_scope().find_variable(init.declarator.name):
                     print(
-                        f"Re-declared variable {init.declarator.name} at line {driver.lexer.lineno}.\n"
+                        f"Re-declared variable {init.declarator.name} at line {driver.lexer.lineno}"
                     )
+                    errors_found += 1
                     return False
 
-                symboltab.check_and_add_variable(init.declarator.name, self.decl_type)
-                init.declarator.ddecl.dec_type = self.decl_type
-                init.declarator.name._type = self.decl_type
-                init.declarator.name.node_type = "identifier_" + self.decl_type.typename
-                # print(init.declarator.name)
+                if (
+                    init.declarator.is_pointer
+                    and "pointer" not in self.decl_type.typename
+                ):
+                    self.decl_type.typename = "pointer_" + self.decl_type.typename
+
+                if self.add_to_symboltab:
+
+                    if "struct" in self.decl_type.typename:
+                        if (
+                            self.decl_type.typename.split("_")[0]
+                            in global_structs.keys()
+                        ):
+                            for element in global_structs[
+                                self.decl_type.typename.split("_")[0]
+                            ].keys():
+                                _name = f"{self.decl_type.typename.split('_')[0]}_{init.declarator.name.name}_{element}"
+                                _type = global_structs[
+                                    self.decl_type.typename.split("_")[0]
+                                ][element][0]
+                                element_array_size = global_structs[
+                                    self.decl_type.typename.split("_")[0]
+                                ][element][1]
+                                symboltab.check_and_add_variable(
+                                    cppId(_name, cppType(_type), element_array_size),
+                                    cppType(_type),
+                                )
+
+                                curr_scope = symboltab.get_current_scope()
+                                reg_name = curr_scope.var_to_string_map[_name]
+                                register_type[reg_name] = (
+                                    "reg",
+                                    _type,
+                                    element_array_size,
+                                )
+                        else:
+                            errors_found += 1
+                            print(
+                                f"Structure {self.decl_type.typename.split('_')[0]} does not exist at line {driver.lexer.lineno}"
+                            )
+                    symboltab.check_and_add_variable(
+                        init.declarator.name, self.decl_type
+                    )
+                    curr_scope = symboltab.get_current_scope()
+                    if init.declarator.name.array_size > 0:
+                        reg_type = "reg_array"
+                        register_type[
+                            curr_scope.var_to_string_map[init.declarator.name.name]
+                        ] = (
+                            reg_type,
+                            self.decl_type.typename,
+                            init.declarator.name.array_size,
+                        )
+                    else:
+                        reg_type = "reg"
+                        if self.decl_type.typename.split("_")[0] == "pointer":
+                            reg_type = (
+                                f"reg_pointer_{self.decl_type.typename.split('_')[1]}"
+                            )
+                            register_type[
+                                curr_scope.var_to_string_map[init.declarator.name.name]
+                            ] = (
+                                reg_type,
+                                "int",
+                                init.declarator.name.array_size,
+                            )
+                        else:
+                            if self.decl_type.typename in ["int", "char", "float"]:
+                                reg_type = "reg"
+                                register_type[
+                                    curr_scope.var_to_string_map[
+                                        init.declarator.name.name
+                                    ]
+                                ] = (
+                                    reg_type,
+                                    self.decl_type.typename,
+                                    init.declarator.name.array_size,
+                                )
+
+                    init.declarator.ddecl.dec_type = self.decl_type
+                    init.declarator.name._type = self.decl_type
+                    init.declarator.name.node_type = (
+                        "identifier_" + self.decl_type.typename
+                    )
+
+                    # if init.declarator.is_pointer:
+                    #     reg = curr_scope.var_to_string_map[init.declarator.name.name]
+                    #     register_type[reg] = (
+                    #         "reg",
+                    #         init.declarator.name._type.typename,
+                    #     )
 
         return True
 
@@ -3319,6 +4630,7 @@ class cppStmt(cppNode):
         self.check_stmt()
 
     def check_stmt(self):
+        global errors_found
         if self.stmt_type not in [
             "compound",
             "expr",
@@ -3327,8 +4639,9 @@ class cppStmt(cppNode):
             "jump",
             "label",
         ]:
+            errors_found += 1
             print(
-                f"Invalid statement type {self.stmt_type} at line {driver.lexer.lineno}.\n"
+                f"Invalid statement type {self.stmt_type} at line {driver.lexer.lineno}"
             )
             return False
 
@@ -3342,7 +4655,6 @@ class cppStmt(cppNode):
 class cppCompoundStmt(cppStmt):
     def __init__(self, cmpd_decls: List[cppDeclaration], cmpd_stmts: List[cppStmt]):
         super().__init__("compound")
-        #     return False
 
         self.cmpd_decls = cmpd_decls
 
@@ -3350,10 +4662,6 @@ class cppCompoundStmt(cppStmt):
         self.stmt = [cmpd_decls, cmpd_stmts]
 
         self.idx = cmpd_decls[0].cmpd_idx if cmpd_decls is not None else 0
-
-        # TODO: Compound statement own scope
-        # TODO: add variables in decls
-        # TODO: checking return as last stmt
 
         # if self.cmpd_decls is not None:
         #     for decl in self.cmpd_decls:
@@ -3364,12 +4672,10 @@ class cppCompoundStmt(cppStmt):
         #                 decl_type = cppType(f"pointer_{decl_type.typename}")
         #             symboltab.check_and_add_variable(dec_n.declarator.name, decl_type)
 
-        # print(self.stmt)
         # symboltab.remove_scope_from_stack()
 
         self.check_cmpd()
 
-    # TODO: add type checking consistently
     def check_cmpd(self):
         if self.cmpd_stmts:
             for ostm in self.cmpd_stmts:
@@ -3377,27 +4683,62 @@ class cppCompoundStmt(cppStmt):
                     ostm, (cppCompoundStmt, cppIterateStmt, cppJumpStmt, cppSelectStmt)
                 ):
                     for stm in ostm:
+
                         if isinstance(stm, cppPostfixExpr):
-                            symboltab.check_undeclared_variable(stm.pf_expr.pf_expr)
+                            if isinstance(stm.pf_expr, cppId):
+                                symboltab.check_undeclared_variable(stm.pf_expr)
+                            elif not isinstance(stm.pf_expr, cppConst):
+                                symboltab.check_undeclared_variable(stm.pf_expr.pf_expr)
 
                         elif isinstance(stm, cppAssignExpr):
-                            if isinstance(stm.unaryexpr.un_expr.pf_expr, cppId):
+
+                            if isinstance(
+                                stm.unaryexpr.un_expr, cppUnExpr
+                            ) and isinstance(
+                                stm.unaryexpr.un_expr.un_expr.pf_expr, cppId
+                            ):
+                                symboltab.check_undeclared_variable(
+                                    stm.unaryexpr.un_expr.un_expr.pf_expr
+                                )
+                            elif isinstance(stm.unaryexpr.un_expr.pf_expr, cppId):
                                 symboltab.check_undeclared_variable(
                                     stm.unaryexpr.un_expr.pf_expr
                                 )
+                            elif isinstance(
+                                stm.assign_expr, cppArithExpr
+                            ) and isinstance(stm.assign_expr.cast_lhs.pf_expr, cppId):
+                                symboltab.check_undeclared_variable(
+                                    stm.assign_expr.cast_lhs.pf_expr
+                                )
+                            elif isinstance(
+                                stm.assign_expr, cppArithExpr
+                            ) and isinstance(
+                                stm.assign_expr.cast_lhs.pf_expr.pf_expr, cppId
+                            ):
+                                symboltab.check_undeclared_variable(
+                                    stm.assign_expr.cast_lhs.pf_expr.pf_expr
+                                )
 
-                            elif isinstance(stm.assign_expr.un_expr.pf_expr, cppId):
-                                # print(stm.assign_expr.un_expr.pf_expr.name)
+                            elif (
+                                stm.assign_expr
+                                and not isinstance(stm.assign_expr, cppPostfixExpr)
+                                and isinstance(stm.assign_expr.un_expr.pf_expr, cppId)
+                            ):
                                 symboltab.check_undeclared_variable(
                                     stm.assign_expr.un_expr.pf_expr
                                 )
-                        # print(f"Undeclared Variable referenced: {stm.unaryexpr.un_expr.pf_expr.name}")
+
+                            elif isinstance(
+                                stm.assign_expr, cppPostfixExpr
+                            ) and isinstance(stm.assign_expr.pf_expr, cppId):
+                                symboltab.check_undeclared_variable(
+                                    stm.assign_expr.pf_expr
+                                )
 
         return True
 
     @staticmethod
     def traverse(object):
-        # print(object.cmpd_decls,object.cmpd_stmts)
         graph_list = ["Compound_Statement"]
         if object.cmpd_decls is not None:
             for cmpd_decl in object.cmpd_decls:
@@ -3406,7 +4747,6 @@ class cppCompoundStmt(cppStmt):
             for cmpd_stmt in object.cmpd_stmts:
                 if isinstance(cmpd_stmt, List):
                     for s in cmpd_stmt:
-                        # print(s)
                         graph_list.append(s.traverse(s))
                 else:
                     graph_list.append(cmpd_stmt.traverse(cmpd_stmt))
@@ -3416,7 +4756,6 @@ class cppCompoundStmt(cppStmt):
 class cppExprStmt(cppStmt):
     def __init__(self, e_expr: cppExpr):
         super().__init__("expr")
-        #     return False
 
         self.e_expr = e_expr
         self.stmt = [e_expr]
@@ -3438,7 +4777,6 @@ class cppSelectStmt(cppStmt):
         select_else_stmt: cppStmt = None,
     ):
         super().__init__("select")
-        #     return Fals
 
         self.select_expr = select_expr
         self.select_if_stmt = select_if_stmt
@@ -3454,7 +4792,6 @@ class cppSelectStmt(cppStmt):
 
     @staticmethod
     def traverse(object):
-        # print(object.select_expr[0].rel_lhs)
         graph_list = ["if", object.select_expr[0].traverse(object.select_expr)]
         if object.select_if_stmt is not None:
             graph_list.append(object.select_if_stmt.traverse(object.select_if_stmt))
@@ -3475,7 +4812,6 @@ class cppIterateStmt(cppStmt):
     ):
 
         super().__init__("iterate")
-        #     return False
 
         self.iter_type = iter_type  # ['while', 'for', 'for_init']
         self.iter_init_stmt = iter_init_stmt
@@ -3484,7 +4820,6 @@ class cppIterateStmt(cppStmt):
 
         self.body_stmt = body_stmt
         self.stmt = [iter_type, iter_init_stmt, iter_check_stmt, iter_update_expr]
-        # TODO: Initialize variable in loop statement and add to compound statement scope
         if self.iter_type == "for_init":
             i_type = self.iter_init_stmt[0]
             i_init = cppInitializer(self.iter_init_stmt[1])
@@ -3511,7 +4846,6 @@ class cppIterateStmt(cppStmt):
 
     @staticmethod
     def traverse(object):
-        # print(object.iter_init_stmt)
         graph_list = [object.iter_type]
         if object.iter_init_stmt is not None:
             graph_list.append(
@@ -3546,7 +4880,6 @@ class cppIterateStmt(cppStmt):
 class cppJumpStmt(cppStmt):
     def __init__(self, jump_type: str, jump_expr: cppExpr = None):
         super().__init__("jump")
-        #     return False
 
         self.jump_type = jump_type
         self.jump_expr = jump_expr
@@ -3554,10 +4887,10 @@ class cppJumpStmt(cppStmt):
         self.check_jumpstmt()
 
     def check_jumpstmt(self):
+        global errors_found
         if self.jump_type not in ["break", "continue", "goto", "return"]:
-            print(
-                f"Invalid statement {self.jump_type} at line {driver.lexer.lineno}.\n"
-            )
+            errors_found += 1
+            print(f"Invalid statement {self.jump_type} at line {driver.lexer.lineno}")
             return False
 
         if self.jump_type == "break":
@@ -3568,9 +4901,8 @@ class cppJumpStmt(cppStmt):
                     flag = True
                 scope = scope.parent
             if not flag:
-                print(
-                    f"Break statement not within loop at line {driver.lexer.lineno}.\n"
-                )
+                # errors_found += 1
+                # print(f"Break statement not within loop at line {driver.lexer.lineno}")
                 return False
 
         elif self.jump_type == "continue":
@@ -3581,25 +4913,27 @@ class cppJumpStmt(cppStmt):
                     flag = True
                 scope = scope.parent
             if not flag:
-                print(
-                    f"Continue statement not within loop at line {driver.lexer.lineno}.\n"
-                )
+                # errors_found += 1
+                # print(
+                #     f"Continue statement not within loop at line {driver.lexer.lineno}"
+                # )
                 return False
 
     @staticmethod
     def traverse(object):
-        return [object.jump_type, object.jump_expr.traverse(object.jump_expr)]
+        if object.jump_expr is not None:
+            return [object.jump_type, object.jump_expr.traverse(object.jump_expr)]
+        else:
+            return [object.jump_type]
 
 
 class cppLabelStmt(cppStmt):
     def __init__(self, label_id: cppId, label_stmt: cppStmt):
         super().__init__("label")
-        #     return False
 
         self.label_id = label_id
         self.label_stmt = label_stmt
         self.stmt = [label_id, label_stmt]
-        # TODO: add label to symbol table in the current scope
 
         self.check_labelstmt()
 
@@ -3620,7 +4954,6 @@ class cppLabelStmt(cppStmt):
 class cppFuncArgs(cppNode):
     def __init__(self, funcargs: List[cppAssignExpr]):
         super().__init__("function_arguments")
-        #     return False
 
         self.funcargs = funcargs
         self.check_funcargs()
@@ -3653,22 +4986,22 @@ stack_space = {}
 saved_reg = {}
 
 
-def write_activation():
-    global stack_space
-    with open("activation_record.csv", "w") as f_w:
-        writer = csv.writer(f_w)
-        writer.writerow(
-            [
-                "Function name",
-                "Local / Param",
-                "Variable name",
-                "Variable size",
-                "Old Stack pointer size",
-            ]
-        )
-        for func in stack_space.keys():
-            for var in stack_space[func]:
-                writer.writerow([func, var["location"], var["name"], var["size"], 4])
+# def write_activation():
+#     global stack_space
+#     with open("activation_record.csv", "w") as f_w:
+#         writer = csv.writer(f_w)
+#         writer.writerow(
+#             [
+#                 "Function name",
+#                 "Local / Param",
+#                 "Variable name",
+#                 "Variable size",
+#                 "Old Stack pointer size",
+#             ]
+#         )
+#         for func in stack_space.keys():
+#             for var in stack_space[func]:
+#                 writer.writerow([func, var["location"], var["name"], var["size"], 4])
 
 
 class cppFuncDef(cppNode):
@@ -3678,7 +5011,8 @@ class cppFuncDef(cppNode):
         func_decl: cppDeclarator,
         func_stmt: cppCompoundStmt,
     ):
-        global stack_space, f
+        global stack_space
+        global errors_found
         super().__init__("function_definition")
 
         self.func_type = func_type
@@ -3700,7 +5034,7 @@ class cppFuncDef(cppNode):
 
         # if os.path.exists("activation.csv"):
         #     os.remove("activation.csv")
-        if self.func_param_list:
+        if self.func_param_list is not None:
             for prm in self.func_param_list:
                 stack_space[self.func_name.name].append(
                     {
@@ -3710,43 +5044,82 @@ class cppFuncDef(cppNode):
                         "location": "param",
                     }
                 )
-        if self.func_stmt.cmpd_decls:
+
+        if self.func_stmt.cmpd_decls is not None:
             for decl in self.func_stmt.cmpd_decls:
                 var_type = decl.decl_type
                 for var in decl.initdecl_list:
                     stack_space[self.func_name.name].append(
                         {
                             "name": var.declarator.name.name,
-                            "size": dtype_size[var_type.typename],
+                            "size": max(1, var.declarator.name.array_size)
+                            * dtype_size[var_type.typename],
                             "is_return": False,
                             "location": "local",
                         }
                     )
 
         return_expr = None
-        for stmt in self.func_stmt.cmpd_stmts:
-            if isinstance(stmt, cppJumpStmt) and stmt.jump_type == "return":
-                return_expr = stmt.jump_expr
-                break
+
+        if self.func_stmt.cmpd_stmts is None:
+            if self.func_type.typename != "void":
+                errors_found += 1
+                print(
+                    f"Function of type {self.func_type.typename} at line {driver.lexer.lineno} should have a return statement"
+                )
+        else:
+            if not (
+                isinstance(self.func_stmt.cmpd_stmts[-1], cppJumpStmt)
+                and self.func_stmt.cmpd_stmts[-1].jump_type == "return"
+            ):
+                if self.func_type.typename != "void":
+                    errors_found += 1
+                    print(
+                        f"Function of type {self.func_type.typename} at line {driver.lexer.lineno} should have a return statement"
+                    )
+            else:
+                if self.func_stmt.cmpd_stmts[-1].jump_expr is not None:
+                    return_expr = self.func_stmt.cmpd_stmts[-1].jump_expr
+                else:
+                    if self.func_type.typename != "void":
+                        errors_found += 1
+                        print(
+                            f"Function of type {self.func_type.typename} at line {driver.lexer.lineno} should have a return expression. \n"
+                        )
 
         # Check return expr type
-        if return_expr and return_expr.expr_type != self.func_type.typename:
-            print(
-                f"Return Types {return_expr.expr_type}, {self.func_type.typename} mismatch.\n"
-            )
+        if return_expr:
+            if (
+                isinstance(return_expr.expr_type, str)
+                and return_expr.expr_type != self.func_type.typename
+            ):
+                # print(
+                #     f"Return Types {return_expr.expr_type}, {self.func_type.typename} mismatch at line {driver.lexer.lineno}"
+                # )
+                pass
+            elif (
+                isinstance(return_expr.expr_type, cppType)
+                and return_expr.expr_type.typename != self.func_type.typename
+            ):
+                # print(
+                #     f"Return Types {return_expr.expr_type.typename}, {self.func_type.typename} mismatch at line {driver.lexer.lineno}"
+                # )
+                pass
 
         # symboltab.scope_stack.append(symboltab.scope_list[idx])
-        # print(self.func_param_list, self.func_name, self.func_type)
-
+        # symboltab.add_scope_to_stack(self.func_name.name)
         symboltab.check_and_add_function(
-            self.func_name, self.func_type, self.func_nparams, self.scope_id
+            self.func_name,
+            self.func_type,
+            self.func_nparams,
+            self.func_param_list,
+            self.scope_id,
         )
 
         if self.func_param_list is not None:
             for param in self.func_param_list:
                 p_type = param.pdec_type
                 p_name = param.pdec_param.name
-                # print(p_name)
                 symboltab.check_and_add_variable(p_name, p_type)
         # symboltab.scope_stack.pop()
         self.check_func_def()
@@ -3756,7 +5129,6 @@ class cppFuncDef(cppNode):
 
     @staticmethod
     def traverse(object):
-        # print(cppNode.traverse(object.func_param_list))
         graph_list = [
             "Function_Declaration",
             object.func_type.traverse(object.func_type),
@@ -3764,7 +5136,6 @@ class cppFuncDef(cppNode):
         ]
         if object.func_param_list is not None:
             for i in object.func_param_list:
-                # print(i.pdec_type.typename,i.pdec_param.name.name)
                 graph_list.append(i.pdec_param.name.traverse(i.pdec_param.name))
         graph_list.append(object.func_stmt.traverse(object.func_stmt))
 
@@ -3774,7 +5145,6 @@ class cppFuncDef(cppNode):
 class cppBaseSpec(cppNode):
     def __init__(self, bspec_id: cppId, bspec_acc_spec: str):
         super().__init__("base_specifier")
-        #     return False
 
         self.bspec_id = bspec_id
         self.bspec_acc_spec = bspec_acc_spec
@@ -3794,7 +5164,6 @@ class cppMemberDeclaration(cppNode):
         member_access: str = None,
     ):
         super().__init__("member_declaration")
-        #     return False
 
         self.decl_type = decl_type
         self.memberdecl_list = memberdecl_list
@@ -3803,15 +5172,20 @@ class cppMemberDeclaration(cppNode):
         self.check_member_dec()
 
     def check_member_dec(self):
+        global errors_found
         if self.member_type not in ["var", "func"]:
-            print(f"Member declaration of type {self.member_type} not valid.\n")
+            errors_found += 1
+            print(
+                f"Member declaration of type {self.member_type} not valid at line {driver.lexer.lineno}"
+            )
             return False
 
         for memb in self.memberdecl_list:
             # Void assignment invalid
             if self.decl_type == "void":
+                errors_found += 1
                 print(
-                    f"Void variable {memb.name} cannot be assigned a value at line {driver.lexer.lineno}.\n"
+                    f"Void variable {memb.name} cannot be assigned a value at line {driver.lexer.lineno}"
                 )
                 return False
 
@@ -3820,18 +5194,20 @@ class cppMemberDeclaration(cppNode):
                 memb.declarator.arr_offset is not None
                 and memb.declarator.arr_offset.node_type.split("_")[1] != "int"
             ):
+                errors_found += 1
                 print(
-                    f"Array offset {memb.declarator.arr_offset} must be of int type at line {driver.lexer.lineno}.\n"
+                    f"Array offset {memb.declarator.arr_offset} must be of int type at line {driver.lexer.lineno}"
                 )
                 return False
 
             # Redeclaring variable
             if symboltab.get_current_scope().find_variable(memb.declarator.name):
+                errors_found += 1
                 print(
-                    f"Re-declared variable {memb.declarator.name} at line {driver.lexer.lineno}.\n"
+                    f"Re-declared variable {memb.declarator.name} at line {driver.lexer.lineno}"
                 )
                 return False
-            # print(memb.declarator.name.name)
+
             # symboltab.check_and_add_variable(memb.declarator.name, self.decl_type)
 
         return True
@@ -3849,7 +5225,6 @@ class cppFunction(cppNode):
         f_permission=0,  # Public: 0, Protected: 1, Private: 2
     ):
         super().__init__("function")
-        #     return Fals
 
         self.f_name = f_name
         self.f_param_decls = f_param_decls
@@ -3870,12 +5245,18 @@ class cppFunction(cppNode):
         for f_decl in self.f_decls:
             f_dec_type = f_decl.decl_type
             for f_init_decl in f_decl:
-                self.f_local_vars.append((f_init_decl.declarator.name, f_dec_type))
+                self.f_local_vars.append(
+                    (
+                        f_init_decl.declarator.name,
+                        f_dec_type,
+                        f_init_decl.declarator.array_size,
+                    )
+                )
 
         for f_var in self.f_local_vars:
             symboltab.check_and_add_variable(f_var)
 
-        symboltab.remove_scope_from_stack()
+        # symboltab.remove_scope_from_stack()
 
         self.check_func()
 
@@ -3890,7 +5271,6 @@ class cppFunction(cppNode):
 class cppStructDeclarator(cppDeclarator):
     def __init__(self, s_declarator: cppDeclarator, s_con_expr: cppCondExpr = None):
         super().__init__(s_declarator.name)
-        # print(f'3004 {self.name}')
         self.declarator = s_declarator
         self.s_con_expr = s_con_expr
 
@@ -3900,15 +5280,13 @@ class cppStructDeclarator(cppDeclarator):
         return True
 
 
-# TODO:
 class cppStructDeclaration(cppDeclaration):
     def __init__(
         self, s_specifier: List[cppType], s_declarator_list: List[cppStructDeclarator]
     ):
-        super().__init__(s_specifier, s_declarator_list)
+        super().__init__(s_specifier, s_declarator_list, False)
         self.s_specifier = s_specifier
         self.s_declarator_list = s_declarator_list
-        # print(s_declarator_list[0].name.name,s_declarator_list[1].name.name)
         self.s_declaration_check()
 
     def s_declaration_check(self):
@@ -3926,33 +5304,53 @@ class cppStructDeclaration(cppDeclaration):
 
 class cppStruct(cppNode):
     def __init__(
-        self, s_tag: cppId, s_id: cppId, s_decls: List[cppStructDeclaration] = None
+        self,
+        s_tag: cppId,
+        s_id: cppId,
+        s_decls: List[cppStructDeclaration] = None,
+        s_flag=0,
     ):
         super().__init__("struct")
-        #     return False
-
+        global global_structs
+        global errors_found
         self.s_tag = s_tag
         self.s_id = s_id
+        self.s_flag = s_flag
         self.s_decls = s_decls
+        self.struct_size = 0
 
         # Initialize own scope
-        symboltab.check_and_add_struct(self.s_tag, self.s_id)
+        if self.s_flag == 0:
+            symboltab.check_and_add_struct(self.s_tag, self.s_id)
 
-        # Extract variables from declarations to add to symboltable scope
-        self.s_vars = []
-        if s_decls is not None:
-            for s_decl in s_decls:
-                s_type = s_decl.decl_type
+            # Extract variables from declarations to add to symboltable scope
+            self.s_vars = []
+            if self.s_id.name not in global_structs:
+                global_structs[self.s_id.name] = {}
+            if s_decls is not None:
+                for s_decl in s_decls:
+                    s_type = s_decl.decl_type
 
-                s_initdecl_list = s_decl.initdecl_list
-                for s_initdecl in s_initdecl_list:
-                    self.s_vars.append((s_initdecl.declarator.name, s_type))
+                    s_initdecl_list = s_decl.initdecl_list
+                    for i, s_initdecl in enumerate(s_initdecl_list):
+                        self.s_vars.append((s_initdecl.declarator.name, s_type))
+                        global_structs[self.s_id.name][
+                            s_initdecl.declarator.name.name
+                        ] = (s_type.typename, s_initdecl.declarator.name.array_size)
+                        self.struct_size += dtype_size[s_type.typename]
 
-            for s_var in self.s_vars:
-                symboltab.check_and_add_variable(s_var[0], s_var[1])
+                for s_var in self.s_vars:
+                    symboltab.check_and_add_variable(s_var[0], s_var[1])
 
             symboltab.remove_scope_from_stack()
 
+            if f"{self.s_tag.name}_struct" not in dtype_size.keys():
+                dtype_size[f"{self.s_tag.name}_struct"] = self.struct_size
+            else:
+                errors_found += 1
+                print(
+                    f"Redeclaring existing struct {self.s_tag.name} at {driver.lexer.lineno}"
+                )
         self.check_struct()
 
     def check_struct(self):
@@ -3961,7 +5359,6 @@ class cppStruct(cppNode):
     @staticmethod
     def traverse(object):
         pass
-        # print(s_decls[0].s_declarator_list[1].declarator.name.name)
 
 
 class cppClass(cppNode):
@@ -4123,6 +5520,7 @@ ap.add_argument("-m", "--mode", type=str, help="lexer or parser", default="parse
 
 args = vars(ap.parse_args())
 
+
 class Parser:
     def __init__(self, file):
         self.file = file
@@ -4173,18 +5571,19 @@ class Parser:
         df.to_csv(f"outputs/output_test_{args['num']}.csv", header=False)
 
 
-driver = Parser(f"tests/semantic/test_{args['num']}.cpp")
+driver = Parser(f"tests/test_{args['num']}_processed.cpp")
 
 if args["mode"] == "parse":
     driver.run_parse()
     symboltab.savecsv()
-    write_activation()
+    # write_activation()
     # print(driver.tree)
-    ast1 = cppStart.traverse(driver.tree["data"])
-    # print(ast)
-    graph = pydot.Dot("AST", graph_type="graph")
-    ast, graph = cppStart.gen_graph(driver.tree["data"], graph)
-    graph.write_png("AST.png")
+    # ast1 = cppStart.traverse(driver.tree["data"])
+    # # print(ast)
+    # graph = pydot.Dot("AST", graph_type="graph")
+    # ast, graph = cppStart.gen_graph(driver.tree["data"], graph)
+    # graph.write_png("src/AST.png")
+
 elif args["mode"] == "lex":
     driver.run_lex()
     driver.print_tokens()

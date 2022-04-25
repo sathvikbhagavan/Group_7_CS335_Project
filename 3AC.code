@@ -1,6 +1,0 @@
-main | 
-    Func_Start : Stack_space 4
-    reg0 = 2
-    t_reg1 = 0
-    return t_reg1
-    Func_End

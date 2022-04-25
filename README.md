@@ -38,3 +38,14 @@ make semantic_n
 (`n = 1,2,...,5`)
 
 symboltable.csv will get created and get saved in main (`~/`) directory.
+
+## Milestone 6 (Final Destination)
+
+There are 16 testcases in  `~/tests/`. To run test `n`, run the following command in the main (`~/`) directory: 
+
+```console
+./compile.sh n
+```
+(`n = 1,2,...,16`)
+
+mips.s will get created and saved in bin (`~/bin/`) directory in case of no error in compilation.

@@ -1,10 +1,20 @@
-int add(int x, int y) {
-    float d=1.0;
-
-    return d;
-}
+struct Complex{
+    float real;
+    float imag;
+};
 
 int main() {
-    int x;
-    
+    struct Complex A;
+    struct Complex B;
+    int r, i;
+    A.real = 1;
+    A.imag = 0;
+    B.real = 20;
+    B.imag = 0;
+    r = A.real + B.real;
+    i = A.imag + B.imag;
+    output(r);
+    output(" + i ");
+    output(i);
+    return 0;
 }
